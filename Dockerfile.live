@@ -1,0 +1,23 @@
+# Image for the live Kraken Futures cron runner.
+# Build:  docker build -f Dockerfile.live -t trader-live .
+# Run:    docker run --rm --env-file .env.live trader-live
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Build deps for the TradingAgents wheel set; removed in the same layer.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /app
+
+# Install the TradingAgents core, then the live layer's extra dep.
+RUN pip install . \
+    && pip install -r requirements-live.txt
+
+# One cron tick: analyse, (maybe) open a position, exit.
+CMD ["python", "-m", "live.runner"]

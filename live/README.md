@@ -28,17 +28,27 @@ One cron tick = one decision cycle for **one instrument**.
 > within minutes and fees (~0.1% round trip) eat into the 0.5% move. Watch the
 > first runs.
 
-## Run locally (dry-run)
+## Three levels of testing
+
+| Mode | Env | Needs | What it exercises |
+|------|-----|-------|-------------------|
+| **Offline** | `NO_BROKER=true` | only `GOOGLE_API_KEY` | LLM analysis + sizing + SL/TP math, on the **real** SOL price (public). Fake balance, assumes flat, sends nothing. |
+| **Dry-run** | `LIVE=false` | + Kraken **read-only** key | adds real balance/position reads. Still sends nothing. |
+| **Live** | `LIVE=true` | + Kraken **trading** key | sends real orders. |
+
+`NO_BROKER=true` forces `LIVE=false` — offline can never trade.
+
+## Run locally
 
 ```bash
 pip install .                      # TradingAgents core
 pip install -r requirements-live.txt
-cp .env.live.example .env.live     # fill GOOGLE_API_KEY + Kraken keys
+cp .env.live.example .env.live     # fill GOOGLE_API_KEY (+ Kraken keys for dry-run/live)
 set -a && source .env.live && set +a
 python -m live.runner
 ```
 
-With `LIVE=false` you'll see `[DRY-RUN] ENTRY ...`, `[DRY-RUN] STOP-LOSS ...`,
+Offline / dry-run you'll see `[DRY-RUN] ENTRY ...`, `[DRY-RUN] STOP-LOSS ...`,
 `[DRY-RUN] TAKE-PROFIT ...` lines — the orders it *would* send.
 
 ## Deploy on Railway

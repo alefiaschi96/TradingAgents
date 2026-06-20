@@ -46,7 +46,7 @@ def run_once() -> dict:
 
     api_key = os.environ.get("KRAKEN_API_KEY", "")
     api_secret = os.environ.get("KRAKEN_API_SECRET", "")
-    if not api_key or not api_secret:
+    if not cfg.no_broker and (not api_key or not api_secret):
         _emit("abort", reason="missing KRAKEN_API_KEY / KRAKEN_API_SECRET")
         return {"status": "abort", "reason": "missing kraken credentials"}
 

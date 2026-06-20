@@ -34,13 +34,19 @@ class KrakenClient:
         """Instantiate the exchange, load markets, resolve our symbol."""
         import ccxt  # imported here so config/tests don't require ccxt installed
 
-        self.exchange = ccxt.krakenfutures(
-            {
-                "apiKey": self._api_key,
-                "secret": self._api_secret,
-                "enableRateLimit": True,
-            }
-        )
+        if self.cfg.no_broker:
+            # Offline test: public endpoints only (real prices + market specs),
+            # no API key, no authenticated calls. Balance is faked.
+            self.exchange = ccxt.krakenfutures({"enableRateLimit": True})
+            logger.info("NO_BROKER mode: public data only, paper balance=%.2f", self.cfg.paper_balance)
+        else:
+            self.exchange = ccxt.krakenfutures(
+                {
+                    "apiKey": self._api_key,
+                    "secret": self._api_secret,
+                    "enableRateLimit": True,
+                }
+            )
         self.exchange.load_markets()
         self.market = self._resolve_market(self.cfg.symbol)
         self.ccxt_symbol = self.market["symbol"]
@@ -77,6 +83,8 @@ class KrakenClient:
         margin currency total and fall back to free balance. Logged raw in
         dry-run so we can tune this once real keys are connected.
         """
+        if self.cfg.no_broker:
+            return float(self.cfg.paper_balance)
         bal = self.exchange.fetch_balance()
         cur = self.cfg.margin_currency
         total = (bal.get("total") or {}).get(cur)
@@ -99,6 +107,8 @@ class KrakenClient:
 
     def get_open_position(self) -> dict[str, Any] | None:
         """Return the open position dict for our symbol, or None if flat."""
+        if self.cfg.no_broker:
+            return None  # offline: no account to read, assume flat
         positions = self.exchange.fetch_positions([self.ccxt_symbol])
         for p in positions:
             contracts = p.get("contracts")
@@ -107,6 +117,8 @@ class KrakenClient:
         return None
 
     def get_open_orders(self) -> list[dict[str, Any]]:
+        if self.cfg.no_broker:
+            return []  # offline: no authenticated order book to read
         return self.exchange.fetch_open_orders(self.ccxt_symbol)
 
     def amount_for_notional(self, notional_usd: float, price: float) -> float:

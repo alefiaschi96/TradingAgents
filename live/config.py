@@ -78,6 +78,8 @@ class Config:
     # --- behaviour --------------------------------------------------------
     allow_short: bool      # if False, SELL/Underweight => stay flat
     live: bool             # if False, orders are logged but NOT sent
+    no_broker: bool        # if True, skip Kraken auth entirely (offline test)
+    paper_balance: float   # fake equity (USD) used when no_broker
     reattach_stops: bool   # if a live position lacks SL/TP, re-place them
     trigger_signal: str    # "mark" | "index" | "last" for stop triggers
     long_signals: frozenset[str]
@@ -106,6 +108,10 @@ class Config:
             x.strip() for x in _s("ANALYSTS", "market,social,news").split(",") if x.strip()
         )
 
+        # Offline mode can never send orders: it has no authenticated session.
+        no_broker = _b("NO_BROKER", False)
+        live = _b("LIVE", False) and not no_broker
+
         return cls(
             symbol=symbol,
             analysis_symbol=analysis_symbol,
@@ -116,7 +122,9 @@ class Config:
             margin_currency=_s("MARGIN_CURRENCY", "USD"),
             equity_floor_usd=_f("EQUITY_FLOOR_USD", 0.0),
             allow_short=_b("ALLOW_SHORT", True),
-            live=_b("LIVE", False),
+            live=live,
+            no_broker=no_broker,
+            paper_balance=_f("PAPER_BALANCE", 108.0),
             reattach_stops=_b("REATTACH_STOPS", True),
             trigger_signal=_s("TRIGGER_SIGNAL", "mark"),
             long_signals=long_sigs,
@@ -139,6 +147,8 @@ class Config:
             "balance_pct": self.balance_pct,
             "allow_short": self.allow_short,
             "live": self.live,
+            "no_broker": self.no_broker,
+            "paper_balance": self.paper_balance,
             "deep_model": self.deep_model,
             "quick_model": self.quick_model,
             "analysts": list(self.analysts),

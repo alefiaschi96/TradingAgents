@@ -62,6 +62,7 @@ class PaperSimulator:
         self.decision_interval = decision_interval_min * 60.0
         self.kraken = KrakenClient(cfg, "", "")  # no keys: public price/markets only
         self.state = self._load(start_equity)
+        self._last_regime_log = None  # throttles the "regime ready/not ready" log line
 
     def connect(self) -> None:
         # Force public-only mode so price/markets need no API keys.
@@ -216,6 +217,50 @@ class PaperSimulator:
                 return False, f"overextended ({stretch:.1f} ATR from EMA — chasing)"
         return True, "trend-aligned, not overextended"
 
+    def _regime_ready(self) -> tuple[bool, str, str]:
+        """Cheap, direction-agnostic pre-screen: is there a clean tradeable
+        regime *right now*? Used to decide whether it's worth spending an LLM
+        analysis at all. No LLM, just candles. Fails open."""
+        if not self.cfg.regime_filter:
+            return True, "off", "filter off"
+        sig = self._regime_signals()
+        if sig is None:
+            return True, "nodata", "no regime data (allow)"
+        price, ema, ema_prev, atr = sig["price"], sig["ema"], sig["ema_prev"], sig["atr"]
+        slope = ema - ema_prev
+        if price > ema and slope > 0:
+            regime = "up"
+        elif price < ema and slope < 0:
+            regime = "down"
+        else:
+            return False, "chop", "chop (no clear HTF trend)"
+        if atr and atr > 0:
+            stretch = abs(price - ema) / atr
+            if stretch > self.cfg.regime_max_stretch_atr:
+                return False, "stretched", f"overextended ({stretch:.1f} ATR from EMA)"
+        return True, regime, f"{regime}-trend setup"
+
+    def should_decide(self, now_ts: float) -> bool:
+        """Trigger the (expensive) LLM only when the cooldown has elapsed AND a
+        clean regime setup exists now. Replaces the fixed-interval trigger: we
+        scan cheaply every tick and spend tokens only on real setups."""
+        if not self.decision_due(now_ts):  # cooldown since last analysis / exit
+            return False
+        ready, regime, reason = self._regime_ready()
+        self._log_regime(regime, reason, ready)
+        return ready
+
+    def _log_regime(self, regime: str, reason: str, ready: bool) -> None:
+        """Log the regime read only when it changes, to avoid 60s spam."""
+        key = (regime, ready)
+        if key == self._last_regime_log:
+            return
+        self._last_regime_log = key
+        if ready:
+            logger.info("regime ready (%s) — running analysis: %s", regime, reason)
+        else:
+            logger.info("regime not ready — holding off (no LLM): %s", reason)
+
     def _effective_stop_pct(self, entry: float) -> float:
         """Stop distance as a percent of entry: fixed, or scaled to ATR."""
         if self.cfg.stop_mode.lower() != "atr" or entry <= 0:
@@ -317,6 +362,9 @@ class PaperSimulator:
             "equity_after": self.state["equity"],
         })
         self.state["open"] = None
+        # Cooldown counts from the exit too, so we don't re-fire the LLM the very
+        # next tick after a stop-out.
+        self.state["last_decision_at"] = time.time()
         logger.info(
             "CLOSE %s via %s @ %.4f (trigger %.4f) | pnl %+.2f (gross %+.2f, fees %.2f) | equity %.2f | W/L %d/%d",
             side, reason, exit_price, trigger_price, net, gross, fees, self.state["equity"],

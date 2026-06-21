@@ -42,7 +42,7 @@ def main() -> int:
 
     sim.connect()
     log.info(
-        "paper-sim started | %s every %.0fmin, monitor every %.0fs | %s",
+        "paper-sim started | %s | LLM cooldown >=%.0fmin + regime trigger, monitor every %.0fs | %s",
         cfg.symbol, sim.decision_interval / 60, monitor_interval, sim.summary(),
     )
 
@@ -51,8 +51,8 @@ def main() -> int:
             now = time.time()
             if sim.has_open():
                 sim.monitor()
-            elif sim.decision_due(now):
-                log.info("decision due (flat) — running analysis, this takes a few minutes...")
+            elif sim.should_decide(now):
+                log.info("setup detected (flat) — running analysis, this takes a few minutes...")
                 sim.maybe_decide(now)
             sim.save()
             log.info("STATUS %s", sim.summary())

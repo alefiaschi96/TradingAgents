@@ -67,6 +67,11 @@ class Config:
     symbol: str            # Kraken Futures native id, e.g. "PF_SOLUSD"
     analysis_symbol: str   # symbol fed to TradingAgents/yfinance, e.g. "SOL-USD"
 
+    # --- intraday analysis (Path 1) --------------------------------------
+    intraday: bool             # analyse intraday bars instead of daily candles
+    intraday_timeframe: str    # ccxt timeframe for the analysis bars, e.g. "15m"
+    intraday_bars: int         # how many recent bars to fetch for the analysis
+
     # --- sizing / risk ----------------------------------------------------
     leverage: float        # target leverage (isolated margin)
     max_leverage: float    # hard cap; bot refuses to exceed this
@@ -92,6 +97,10 @@ class Config:
     temperature: float
     debate_rounds: int
     analysts: tuple[str, ...]
+    google_thinking_level: str       # "" leaves the model default; "low"/"high" tune latency
+    analysis_max_attempts: int       # retries on transient network drops during analysis
+    stream_llm: bool                 # stream Gemini calls (avoids ~60s non-streaming cutoff)
+    debug: bool                      # print every analyst/agent node output as it runs
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -115,6 +124,9 @@ class Config:
         return cls(
             symbol=symbol,
             analysis_symbol=analysis_symbol,
+            intraday=_b("INTRADAY", True),
+            intraday_timeframe=_s("INTRADAY_TIMEFRAME", "15m"),
+            intraday_bars=_i("INTRADAY_BARS", 300),
             leverage=_f("LEVERAGE", 5.0),
             max_leverage=_f("MAX_LEVERAGE", 5.0),
             stop_pct=_f("STOP_PCT", 0.5),
@@ -135,6 +147,10 @@ class Config:
             temperature=_f("TEMPERATURE", 0.0),
             debate_rounds=_i("DEBATE_ROUNDS", 1),
             analysts=analysts,
+            google_thinking_level=_s("GOOGLE_THINKING_LEVEL", ""),
+            analysis_max_attempts=_i("ANALYSIS_MAX_ATTEMPTS", 3),
+            stream_llm=_b("STREAM_LLM", True),
+            debug=_b("DEBUG", True),
         )
 
     def summary(self) -> dict:

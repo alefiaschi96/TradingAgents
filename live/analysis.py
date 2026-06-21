@@ -16,7 +16,10 @@ entire multi-minute run over a single flaky HTTP round-trip.
 from __future__ import annotations
 
 import logging
+import signal
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -44,6 +47,35 @@ def _transient_network_errors() -> tuple[type[BaseException], ...]:
             if isinstance(exc, type) and issubclass(exc, BaseException):
                 errs.append(exc)
     return tuple(errs)
+
+
+@contextmanager
+def _time_limit(seconds: int):
+    """Raise TimeoutError if the wrapped block runs longer than ``seconds``.
+
+    Uses SIGALRM, so it only arms on Unix and only in the main thread; anywhere
+    else (or seconds<=0) it is a no-op. This turns a silently *stalled* call —
+    e.g. a Gemini stream that opens but never delivers tokens — into a
+    TimeoutError, which run_analysis already treats as transient and retries.
+    """
+    if (
+        seconds <= 0
+        or not hasattr(signal, "SIGALRM")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise TimeoutError(f"analysis exceeded {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def build_config(cfg) -> dict:
@@ -114,9 +146,10 @@ def run_analysis(cfg, trade_date: str | None = None) -> tuple[str, dict]:
 
     for attempt in range(1, attempts + 1):
         try:
-            full_state, rating = graph.propagate(
-                cfg.analysis_symbol, trade_date, asset_type="crypto"
-            )
+            with _time_limit(max(0, cfg.analysis_timeout_sec)):
+                full_state, rating = graph.propagate(
+                    cfg.analysis_symbol, trade_date, asset_type="crypto"
+                )
             logger.info("Analysis decision for %s: %s", cfg.analysis_symbol, rating)
             return rating, full_state
         except transient as e:

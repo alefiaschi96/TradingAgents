@@ -31,7 +31,23 @@ def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:
     ``load_ohlcv`` already normalizes the Date column and filters out
     look-ahead rows, but we re-apply the cutoff defensively — this is a
     verification path, so it must not trust its input to be pre-filtered.
+
+    In intraday mode the snapshot must match what the analyst sees, so we pull
+    intraday bars from the same Kraken source as get_stock_data/get_indicators
+    (the daily look-ahead cutoff does not apply: live analysis is "as of now").
     """
+    from tradingagents.dataflows.config import get_config
+
+    if get_config().get("intraday"):
+        from tradingagents.dataflows.crypto_intraday import fetch_intraday_ohlcv
+
+        df = fetch_intraday_ohlcv(symbol)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date"]).sort_values("Date")
+        if df.empty:
+            raise ValueError(f"No intraday OHLCV rows for {symbol}.")
+        return df
+
     data = load_ohlcv(symbol, curr_date)
     if data is None or data.empty:
         raise ValueError(f"No OHLCV data available for {symbol}.")

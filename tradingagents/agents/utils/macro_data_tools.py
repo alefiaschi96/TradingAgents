@@ -2,6 +2,7 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+from tradingagents.dataflows.errors import VendorNotConfiguredError
 from tradingagents.dataflows.interface import route_to_vendor
 
 
@@ -33,4 +34,15 @@ def get_macro_indicators(
     Returns:
         str: A formatted markdown report of the macro series
     """
-    return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
+    try:
+        return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
+    except VendorNotConfiguredError:
+        # Macro data is optional context: a missing vendor key (e.g. FRED) must
+        # not crash the whole analysis. Degrade gracefully so the news analyst
+        # proceeds without macro instead of aborting the run. Set FRED_API_KEY
+        # to enable real macro data.
+        return (
+            "MACRO_DATA_UNAVAILABLE: macro indicators are not configured "
+            "(set FRED_API_KEY for FRED data). Proceed without macro context "
+            "— do not fabricate values."
+        )

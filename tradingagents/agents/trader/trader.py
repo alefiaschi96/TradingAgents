@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage
 
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
 from tradingagents.agents.utils.agent_utils import (
+    get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
 )
@@ -33,6 +34,7 @@ def create_trader(llm):
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
                     "Anchor your reasoning in the analysts' reports and the research plan."
                     + get_language_instruction()
+                    + get_horizon_instruction()
                 ),
             },
             {

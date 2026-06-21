@@ -1,7 +1,9 @@
 from tradingagents.agents.utils.agent_utils import (
+    get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from tradingagents.dataflows.config import get_config
 
 
 def create_bear_researcher(llm):
@@ -24,7 +26,32 @@ def create_bear_researcher(llm):
             else "Asset fundamentals report (may be unavailable for crypto)"
         )
 
-        prompt = f"""You are a Bear Analyst making the case against investing in the {target_label}. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
+        if get_config().get("intraday"):
+            prompt = f"""You are an intraday Bear Analyst building the SHORT case for the {target_label} over the NEXT 1-2 HOURS on 15-minute bars. This is a short-term trade, NOT a multi-day or multi-week investment. Your goal is to argue, with intraday price action, why the next 1-2 hours favor being short or flat, and to refute the intraday long case.
+
+Key points to focus on:
+
+- Momentum breakdown: Highlight loss of upside momentum — EMA9 rolling over or crossing below EMA21, bearish MACD crossover or fading histogram, RSI losing the 50 level or printing bearish divergence into recent highs.
+- Rejection at VWAP / resistance: Emphasize price being rejected at or below VWAP (sellers in control), failure to reclaim VWAP, or stalling into intraday resistance, prior swing highs, round numbers, or the upper Bollinger band.
+- Breakdown of intraday levels: Point to loss of intraday support, lower-high / lower-low structure, breakdowns through recent swing lows, and failed bounces.
+- Exhaustion / over-extension: Note over-extension above VWAP or band tags that tend to mean-revert lower, climactic volume into highs, and thinning buy-side participation.
+- Long Counterpoints: Critically attack the bull's intraday long thesis with the price action — expose chases into resistance, weak-volume pushes, and bounces likely to fail within the next 1-2 hours.
+- Engagement: Present your argument in a conversational style, directly engaging with the bull analyst's points and debating effectively rather than simply listing facts.
+
+Frame everything around the next 1-2 hours: directional bias, the level/setup that would trigger a short, and the intraday level (e.g. an ATR-based stop above resistance/VWAP) that would invalidate the short read.
+
+Resources available:
+
+{instrument_context}
+Market research report (intraday technicals): {market_research_report}
+Social media sentiment report: {sentiment_report}
+Latest news / catalysts: {news_report}
+Conversation history of the debate: {history}
+Last bull argument: {current_response}
+Use this information to deliver a compelling intraday bear argument, refute the bull's intraday long claims, and engage in a dynamic debate that demonstrates why sellers are likely in control of the {target_label} for the next 1-2 hours.
+""" + get_language_instruction() + get_horizon_instruction()
+        else:
+            prompt = f"""You are a Bear Analyst making the case against investing in the {target_label}. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
 
 Key points to focus on:
 
@@ -44,7 +71,7 @@ Latest world affairs news: {news_report}
 Conversation history of the debate: {history}
 Last bull argument: {current_response}
 Use this information to deliver a compelling bear argument, refute the bull's claims, and engage in a dynamic debate that demonstrates the risks and weaknesses of investing in the {target_label}.
-""" + get_language_instruction()
+""" + get_language_instruction() + get_horizon_instruction()
 
         response = llm.invoke(prompt)
 

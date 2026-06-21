@@ -65,6 +65,31 @@ def get_language_instruction() -> str:
     return f" Write your entire response in {lang}."
 
 
+def get_horizon_instruction() -> str:
+    """Return a prompt directive that pins the trade horizon.
+
+    In intraday mode (config ``intraday``) it forces every agent to reason for a
+    position held over the next 1-2 hours on intraday bars, and away from
+    fundamentals / multi-day theses. Returns empty string in daily mode so the
+    default behavior is unchanged. Applied to researchers, debaters, research
+    manager, trader, and portfolio manager.
+    """
+    from tradingagents.dataflows.config import get_config
+    config = get_config()
+    if not config.get("intraday"):
+        return ""
+    tf = config.get("intraday_timeframe", "15m")
+    return (
+        f" HORIZON: This is an INTRADAY trade. Evaluate strictly for a position "
+        f"held over the next 1-2 hours on {tf} bars. Ground every conclusion in "
+        f"intraday price action — momentum, trend (EMA/VWAP), key intraday "
+        f"levels, breakout vs mean-reversion, and volatility (ATR) for stops. Do "
+        f"NOT reason from fundamentals, valuation, earnings, revenue, scalability "
+        f"or multi-day/multi-week theses; they are irrelevant on this horizon. It "
+        f"is a short-term trade, not an investment."
+    )
+
+
 def _clean_identity_value(value: Any) -> str | None:
     """Return a trimmed string, or None for empty / placeholder-ish values."""
     if not isinstance(value, str):

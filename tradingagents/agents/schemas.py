@@ -201,7 +201,7 @@ class PortfolioDecision(BaseModel):
     )
     time_horizon: str | None = Field(
         default=None,
-        description="Optional recommended holding period, e.g. '3-6 months'.",
+        description="Optional recommended holding period appropriate to the trade horizon (e.g. '90 minutes' for an intraday trade, or '3-6 months' for a position trade).",
     )
 
 

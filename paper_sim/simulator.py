@@ -133,18 +133,9 @@ class PaperSimulator:
             price = self.last_price()
             return price, price
 
-    def _atr(self) -> float | None:
-        """Average True Range over cfg.atr_period bars of cfg.atr_timeframe.
-
-        Returns None if candles can't be fetched or there aren't enough, so the
-        caller can fall back to the fixed-percent stop.
-        """
-        period = self.cfg.atr_period
-        try:
-            ohlcv = self._fetch_ohlcv(self.cfg.atr_timeframe, period + 1)
-        except Exception as e:  # noqa: BLE001 - all retries exhausted
-            logger.warning("ATR: candle fetch failed (%s); falling back to fixed stop", e)
-            return None
+    @staticmethod
+    def _atr_from_ohlcv(ohlcv: list, period: int) -> float | None:
+        """Average True Range over the last ``period`` bars of an OHLCV list."""
         if len(ohlcv) < period + 1:
             return None
         trs = []
@@ -153,6 +144,77 @@ class PaperSimulator:
             trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
         trs = trs[-period:]
         return sum(trs) / len(trs) if trs else None
+
+    @staticmethod
+    def _ema_series(closes: list, period: int) -> list:
+        """Exponential moving average series over ``closes``."""
+        if not closes:
+            return []
+        k = 2.0 / (period + 1)
+        ema = closes[0]
+        out = [ema]
+        for c in closes[1:]:
+            ema = c * k + ema * (1.0 - k)
+            out.append(ema)
+        return out
+
+    def _atr(self) -> float | None:
+        """ATR over cfg.atr_period bars of cfg.atr_timeframe, or None on failure
+        (caller falls back to the fixed-percent stop)."""
+        period = self.cfg.atr_period
+        try:
+            ohlcv = self._fetch_ohlcv(self.cfg.atr_timeframe, period + 1)
+        except Exception as e:  # noqa: BLE001 - all retries exhausted
+            logger.warning("ATR: candle fetch failed (%s); falling back to fixed stop", e)
+            return None
+        return self._atr_from_ohlcv(ohlcv, period)
+
+    def _regime_signals(self) -> dict | None:
+        """Higher-timeframe trend read: EMA (now + a few bars back for slope),
+        the latest price, and ATR — all from one regime-timeframe fetch.
+        Returns None if data is unavailable (the gate then fails open)."""
+        period = self.cfg.regime_ema_period
+        need = period + 5  # extra bars for the slope lookback and ATR
+        try:
+            ohlcv = self._fetch_ohlcv(self.cfg.regime_timeframe, need)
+        except Exception as e:  # noqa: BLE001 - all retries exhausted
+            logger.warning("regime: candle fetch failed (%s); gate will allow", e)
+            return None
+        if len(ohlcv) < period + 2:
+            return None
+        closes = [float(c[4]) for c in ohlcv]
+        ema = self._ema_series(closes, period)
+        return {
+            "price": closes[-1],
+            "ema": ema[-1],
+            "ema_prev": ema[-4] if len(ema) >= 4 else ema[0],
+            "atr": self._atr_from_ohlcv(ohlcv, min(period, len(ohlcv) - 1)),
+        }
+
+    def _regime_gate(self, side: str) -> tuple[bool, str]:
+        """Pre-trade veto: block trades that fight the higher-timeframe trend,
+        that fire in a flat/choppy regime, or that chase an over-extended move.
+        Can only VETO an LLM decision, never create one. Fails open."""
+        if not self.cfg.regime_filter:
+            return True, "filter off"
+        sig = self._regime_signals()
+        if sig is None:
+            return True, "no regime data (allow)"
+        price, ema, ema_prev, atr = sig["price"], sig["ema"], sig["ema_prev"], sig["atr"]
+        slope = ema - ema_prev
+        trend_up = price > ema and slope > 0
+        trend_down = price < ema and slope < 0
+        if not trend_up and not trend_down:
+            return False, "chop (no clear HTF trend)"
+        if side == "buy" and not trend_up:
+            return False, "long against HTF trend"
+        if side == "sell" and not trend_down:
+            return False, "short against HTF trend"
+        if atr and atr > 0:
+            stretch = abs(price - ema) / atr
+            if stretch > self.cfg.regime_max_stretch_atr:
+                return False, f"overextended ({stretch:.1f} ATR from EMA — chasing)"
+        return True, "trend-aligned, not overextended"
 
     def _effective_stop_pct(self, entry: float) -> float:
         """Stop distance as a percent of entry: fixed, or scaled to ATR."""
@@ -172,6 +234,11 @@ class PaperSimulator:
         if side is None:
             logger.info("decision %s -> no entry (stay flat)", rating)
             return
+        allowed, reason = self._regime_gate(side)
+        if not allowed:
+            logger.info("decision %s (%s) -> VETOED by regime gate: %s", rating, side, reason)
+            return
+        logger.info("regime gate OK: %s (%s) -> %s", rating, side, reason)
         self.open_position(side, rating)
 
     def _fill_price(self, price: float, fill_side: str) -> float:

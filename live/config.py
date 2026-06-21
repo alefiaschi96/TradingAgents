@@ -81,6 +81,10 @@ class Config:
     atr_period: int        # number of bars used to compute the ATR
     atr_timeframe: str     # ccxt timeframe for the ATR bars, e.g. "15m"
     take_profit_rr: float  # take-profit distance = rr * stop distance (1.0 = symmetric)
+    regime_filter: bool        # master switch: veto trades that fight the trend or chase extremes
+    regime_timeframe: str      # higher timeframe read for the trend, e.g. "1h"
+    regime_ema_period: int     # EMA period (in regime bars) that defines the trend
+    regime_max_stretch_atr: float  # veto if price is this many ATRs from the regime EMA (anti-chase)
     balance_pct: float     # fraction of balance committed as margin (0-1)
     margin_currency: str    # collateral currency to read from the wallet
     equity_floor_usd: float  # kill-switch: no new trades below this equity
@@ -140,6 +144,10 @@ class Config:
             atr_period=_i("ATR_PERIOD", 14),
             atr_timeframe=_s("ATR_TIMEFRAME", "15m"),
             take_profit_rr=_f("TAKE_PROFIT_RR", 1.0),
+            regime_filter=_b("REGIME_FILTER", False),
+            regime_timeframe=_s("REGIME_TIMEFRAME", "1h"),
+            regime_ema_period=_i("REGIME_EMA_PERIOD", 20),
+            regime_max_stretch_atr=_f("REGIME_MAX_STRETCH_ATR", 3.0),
             balance_pct=_f("BALANCE_PCT", 0.98),
             margin_currency=_s("MARGIN_CURRENCY", "USD"),
             equity_floor_usd=_f("EQUITY_FLOOR_USD", 0.0),

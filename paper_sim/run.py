@@ -35,6 +35,7 @@ def main() -> int:
         state_path=os.environ.get("PAPER_STATE_PATH", _DEFAULT_STATE),
         start_equity=float(os.environ.get("PAPER_START_EQUITY", cfg.paper_balance)),
         fee_pct_per_side=float(os.environ.get("FEE_PCT_PER_SIDE", "0.05")),
+        slippage_pct_per_side=float(os.environ.get("SLIPPAGE_PCT_PER_SIDE", "0.02")),
         decision_interval_min=float(os.environ.get("DECISION_INTERVAL_MIN", "40")),
     )
     monitor_interval = float(os.environ.get("MONITOR_INTERVAL_SEC", "60"))

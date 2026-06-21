@@ -75,7 +75,12 @@ class Config:
     # --- sizing / risk ----------------------------------------------------
     leverage: float        # target leverage (isolated margin)
     max_leverage: float    # hard cap; bot refuses to exceed this
-    stop_pct: float        # +/- percent of entry price for SL and TP
+    stop_pct: float        # +/- percent of entry price for SL (and TP when rr=1)
+    stop_mode: str         # "fixed" (use stop_pct) | "atr" (volatility-scaled stop)
+    stop_atr_mult: float   # stop distance = mult * ATR when stop_mode="atr"
+    atr_period: int        # number of bars used to compute the ATR
+    atr_timeframe: str     # ccxt timeframe for the ATR bars, e.g. "15m"
+    take_profit_rr: float  # take-profit distance = rr * stop distance (1.0 = symmetric)
     balance_pct: float     # fraction of balance committed as margin (0-1)
     margin_currency: str    # collateral currency to read from the wallet
     equity_floor_usd: float  # kill-switch: no new trades below this equity
@@ -130,6 +135,11 @@ class Config:
             leverage=_f("LEVERAGE", 5.0),
             max_leverage=_f("MAX_LEVERAGE", 5.0),
             stop_pct=_f("STOP_PCT", 0.5),
+            stop_mode=_s("STOP_MODE", "fixed"),
+            stop_atr_mult=_f("STOP_ATR_MULT", 1.5),
+            atr_period=_i("ATR_PERIOD", 14),
+            atr_timeframe=_s("ATR_TIMEFRAME", "15m"),
+            take_profit_rr=_f("TAKE_PROFIT_RR", 1.0),
             balance_pct=_f("BALANCE_PCT", 0.98),
             margin_currency=_s("MARGIN_CURRENCY", "USD"),
             equity_floor_usd=_f("EQUITY_FLOOR_USD", 0.0),

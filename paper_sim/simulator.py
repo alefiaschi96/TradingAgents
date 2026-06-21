@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from live.analysis import run_analysis
@@ -52,10 +53,12 @@ class PaperSimulator:
         start_equity: float,
         fee_pct_per_side: float,
         decision_interval_min: float,
+        slippage_pct_per_side: float = 0.0,
     ):
         self.cfg = cfg
         self.state_path = state_path
         self.fee = fee_pct_per_side
+        self.slippage = slippage_pct_per_side
         self.decision_interval = decision_interval_min * 60.0
         self.kraken = KrakenClient(cfg, "", "")  # no keys: public price/markets only
         self.state = self._load(start_equity)
@@ -96,11 +99,69 @@ class PaperSimulator:
     def last_price(self) -> float:
         return self.kraken.get_last_price()
 
+    def _fetch_ohlcv(self, timeframe: str, limit: int) -> list:
+        """Fetch candles with retry — Kraken's charts endpoint drops often.
+
+        Raises the last error if all attempts fail; callers decide the fallback.
+        """
+        last_err = None
+        for attempt in range(3):
+            try:
+                return self.kraken.exchange.fetch_ohlcv(
+                    self.kraken.ccxt_symbol, timeframe, limit=limit
+                )
+            except Exception as e:  # noqa: BLE001 - transient charts-endpoint blips
+                last_err = e
+                time.sleep(1.0 * (attempt + 1))
+        raise last_err
+
     def minute_range(self) -> tuple[float, float]:
-        """(high, low) of the latest 1m candle — catches intra-minute wicks."""
-        ohlcv = self.kraken.exchange.fetch_ohlcv(self.kraken.ccxt_symbol, "1m", limit=2)
-        last = ohlcv[-1]
-        return float(last[2]), float(last[3])
+        """(high, low) of the latest 1m candle — catches intra-minute wicks.
+
+        On a persistent fetch failure, fall back to the last price (a different,
+        more reliable endpoint) as a point check rather than skipping the tick.
+        """
+        try:
+            ohlcv = self._fetch_ohlcv("1m", 2)
+            last = ohlcv[-1]
+            return float(last[2]), float(last[3])
+        except Exception as e:  # noqa: BLE001 - all retries exhausted
+            logger.warning(
+                "minute_range: 1m candle fetch failed (%s); "
+                "falling back to last price for this tick", e,
+            )
+            price = self.last_price()
+            return price, price
+
+    def _atr(self) -> float | None:
+        """Average True Range over cfg.atr_period bars of cfg.atr_timeframe.
+
+        Returns None if candles can't be fetched or there aren't enough, so the
+        caller can fall back to the fixed-percent stop.
+        """
+        period = self.cfg.atr_period
+        try:
+            ohlcv = self._fetch_ohlcv(self.cfg.atr_timeframe, period + 1)
+        except Exception as e:  # noqa: BLE001 - all retries exhausted
+            logger.warning("ATR: candle fetch failed (%s); falling back to fixed stop", e)
+            return None
+        if len(ohlcv) < period + 1:
+            return None
+        trs = []
+        for i in range(1, len(ohlcv)):
+            high, low, prev_close = float(ohlcv[i][2]), float(ohlcv[i][3]), float(ohlcv[i - 1][4])
+            trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+        trs = trs[-period:]
+        return sum(trs) / len(trs) if trs else None
+
+    def _effective_stop_pct(self, entry: float) -> float:
+        """Stop distance as a percent of entry: fixed, or scaled to ATR."""
+        if self.cfg.stop_mode.lower() != "atr" or entry <= 0:
+            return self.cfg.stop_pct
+        atr = self._atr()
+        if not atr:
+            return self.cfg.stop_pct
+        return (self.cfg.stop_atr_mult * atr / entry) * 100.0
 
     # ------------------------------------------------------------- decide
     def maybe_decide(self, now_ts: float) -> None:
@@ -113,26 +174,42 @@ class PaperSimulator:
             return
         self.open_position(side, rating)
 
+    def _fill_price(self, price: float, fill_side: str) -> float:
+        """Adverse-slippage fill for a market order: a buy fills higher, a sell
+        fills lower. Always moves against us so paper results never flatter
+        what live taker fills would actually give."""
+        slip = self.slippage / 100.0
+        return price * (1.0 + slip) if fill_side == "buy" else price * (1.0 - slip)
+
     def open_position(self, side: str, rating: str) -> None:
-        price = self.last_price()
+        ref_price = self.last_price()
+        entry = self._fill_price(ref_price, side)  # market entry slips against us
         equity = self.state["equity"]
         margin = equity * self.cfg.balance_pct
         notional = margin * self.cfg.leverage
-        size = self.kraken.amount_for_notional(notional, price)
-        sl, tp, _close_side = _bracket_prices(side, price, self.cfg.stop_pct)
+        size = self.kraken.amount_for_notional(notional, entry)
+        # SL/TP are set relative to the real (slipped) entry, like live.
+        # Stop width is fixed or ATR-scaled; TP is rr x the stop distance.
+        stop_pct = self._effective_stop_pct(entry)
+        rr = self.cfg.take_profit_rr
+        sl, tp, _close_side = _bracket_prices(side, entry, stop_pct, rr)
         self.state["open"] = {
             "side": side,
             "rating": rating,
-            "entry": price,
+            "entry": entry,
             "size": size,
             "sl": sl,
             "tp": tp,
+            "stop_pct": stop_pct,
+            "rr": rr,
             "notional": notional,
             "opened_at": _now_iso(),
         }
         logger.info(
-            "OPEN %s %s @ %.4f size %.4f | SL %.4f TP %.4f (%.1f%%) | equity %.2f",
-            side, self.cfg.symbol, price, size, sl, tp, self.cfg.stop_pct, equity,
+            "OPEN %s %s @ %.4f (ref %.4f, slip %.3f%%) size %.4f | SL %.4f TP %.4f "
+            "(stop %.2f%% x rr %.1f, mode %s) | equity %.2f",
+            side, self.cfg.symbol, entry, ref_price, self.slippage, size, sl, tp,
+            stop_pct, rr, self.cfg.stop_mode, equity,
         )
 
     # ------------------------------------------------------------- monitor
@@ -148,9 +225,13 @@ class PaperSimulator:
                 pos["side"], low, high, pos["sl"], pos["tp"],
             )
 
-    def close_position(self, exit_price: float, reason: str) -> None:
+    def close_position(self, trigger_price: float, reason: str) -> None:
         pos = self.state["open"]
         side, entry, size = pos["side"], pos["entry"], pos["size"]
+        # SL/TP are market-on-trigger orders, so the actual fill slips past the
+        # trigger, against us (a short buys back higher, a long sells lower).
+        close_side = "buy" if side == "sell" else "sell"
+        exit_price = self._fill_price(trigger_price, close_side)
         gross = (entry - exit_price) * size if side == "sell" else (exit_price - entry) * size
         fees = (entry * size + exit_price * size) * (self.fee / 100.0)
         net = gross - fees
@@ -160,6 +241,7 @@ class PaperSimulator:
         self.state["closed"].append({
             **pos,
             "exit": exit_price,
+            "exit_trigger": trigger_price,
             "outcome": reason,
             "gross": gross,
             "fees": fees,
@@ -169,8 +251,8 @@ class PaperSimulator:
         })
         self.state["open"] = None
         logger.info(
-            "CLOSE %s via %s @ %.4f | pnl %+.2f (gross %+.2f, fees %.2f) | equity %.2f | W/L %d/%d",
-            side, reason, exit_price, net, gross, fees, self.state["equity"],
+            "CLOSE %s via %s @ %.4f (trigger %.4f) | pnl %+.2f (gross %+.2f, fees %.2f) | equity %.2f | W/L %d/%d",
+            side, reason, exit_price, trigger_price, net, gross, fees, self.state["equity"],
             self.state["wins"], self.state["losses"],
         )
 

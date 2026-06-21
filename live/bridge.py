@@ -12,17 +12,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _bracket_prices(side: str, entry_price: float, stop_pct: float) -> tuple[float, float, str]:
+def _bracket_prices(
+    side: str, entry_price: float, stop_pct: float, rr: float = 1.0
+) -> tuple[float, float, str]:
     """Return (stop_loss, take_profit, close_side) for an entry.
 
     For a long: SL below, TP above, closed by a sell.
     For a short: SL above, TP below, closed by a buy.
+
+    ``rr`` is the reward:risk ratio: the take-profit distance is ``rr`` times
+    the stop distance. ``rr=1.0`` (default) keeps the original symmetric
+    bracket, so existing callers are unchanged.
     """
     frac = stop_pct / 100.0
+    tp_frac = frac * rr
     if side == "buy":  # long
-        return entry_price * (1 - frac), entry_price * (1 + frac), "sell"
+        return entry_price * (1 - frac), entry_price * (1 + tp_frac), "sell"
     # short
-    return entry_price * (1 + frac), entry_price * (1 - frac), "buy"
+    return entry_price * (1 + frac), entry_price * (1 - tp_frac), "buy"
 
 
 def open_position(kraken, side: str, cfg) -> dict:

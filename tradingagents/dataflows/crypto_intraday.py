@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEFRAME = "15m"
 _DEFAULT_BARS = 300
+_DEFAULT_VWAP_BARS = 96  # rolling VWAP window: 96 x 15m = 24h of "fair value"
 _INDICATOR_DISPLAY_BARS = 40  # how many recent bars to show in an indicator dump
 
 _exchange = None  # public ccxt singleton (no API keys needed for OHLCV)
@@ -55,6 +56,26 @@ def _lookback_bars() -> int:
     return int(get_config().get("intraday_lookback_bars", _DEFAULT_BARS))
 
 
+def _vwap_window() -> int:
+    return int(get_config().get("intraday_vwap_bars", _DEFAULT_VWAP_BARS))
+
+
+def _add_vwap(df: pd.DataFrame, window: int | None = None) -> pd.DataFrame:
+    """Add a rolling VWAP column — the intraday 'fair value' anchor.
+
+    stockstats has no session VWAP, and 24/7 crypto has no session anyway, so
+    we use a rolling volume-weighted average price over ``window`` bars
+    (default 24h). Typical price = (H+L+C)/3.
+    """
+    window = window or _vwap_window()
+    typical = (df["High"] + df["Low"] + df["Close"]) / 3.0
+    pv = (typical * df["Volume"]).rolling(window, min_periods=1).sum()
+    vol = df["Volume"].rolling(window, min_periods=1).sum()
+    df = df.copy()
+    df["vwap"] = (pv / vol.replace(0, pd.NA)).astype(float)
+    return df
+
+
 def fetch_intraday_ohlcv(symbol: str, timeframe: str | None = None, limit: int | None = None) -> pd.DataFrame:
     """Return a DataFrame[Date, Open, High, Low, Close, Volume] of intraday bars.
 
@@ -76,7 +97,10 @@ def fetch_intraday_ohlcv(symbol: str, timeframe: str | None = None, limit: int |
 
     df = pd.DataFrame(raw, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
     df["Date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_localize(None)
-    return df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+    df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+    # VWAP is added here so every consumer (get_stock_data, get_indicators, the
+    # verified snapshot) sees the same 'vwap' column with no extra plumbing.
+    return _add_vwap(df)
 
 
 def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
@@ -90,8 +114,9 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     tf = _timeframe()
     out = df.copy()
     out["Date"] = out["Date"].dt.strftime("%Y-%m-%d %H:%M")
-    for col in ("Open", "High", "Low", "Close"):
-        out[col] = out[col].round(4)
+    for col in ("Open", "High", "Low", "Close", "vwap"):
+        if col in out.columns:
+            out[col] = out[col].round(4)
     header = (
         f"# Intraday OHLCV for {symbol.upper()} — {tf} bars (Kraken)\n"
         f"# Bars: {len(out)} | latest bar: {out['Date'].iloc[-1]} UTC\n"

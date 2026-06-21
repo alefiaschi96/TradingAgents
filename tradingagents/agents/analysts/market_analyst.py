@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.agent_utils import (
@@ -7,22 +9,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
+from tradingagents.dataflows.config import get_config
 
 
-def create_market_analyst(llm):
-
-    def market_analyst_node(state):
-        current_date = state["trade_date"]
-        instrument_context = get_instrument_context_from_state(state)
-
-        tools = [
-            get_stock_data,
-            get_indicators,
-            get_verified_market_snapshot,
-        ]
-
-        system_message = (
-            """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
+# --- Daily (default) indicator guide -------------------------------------
+_DAILY_SYSTEM_MESSAGE = """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
 - close_50_sma: 50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.
@@ -51,6 +42,64 @@ Volume-Based Indicators:
 Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
+
+
+# --- Intraday indicator guide (Path 1) -----------------------------------
+def _intraday_system_message(timeframe: str) -> str:
+    return f"""You are an **intraday technical analyst** trading **{timeframe} bars**. Your decision horizon is the **next 1–2 hours** — NOT a multi-day or multi-week investment. The latest bar is the current moment; everything you read should inform whether to be long, short, or flat for the next couple of hours.
+
+All indicator periods below are in **bars**, not days (e.g. a 9-period EMA spans 9×{timeframe}). Select up to **8** complementary indicators (avoid redundancy). Use the EXACT names below.
+
+Trend (fast):
+- close_9_ema: 9-bar EMA — fast intraday trend. Price above it = short-term upward pressure.
+- close_21_ema: 21-bar EMA — intraday trend filter. EMA9 crossing ABOVE EMA21 = bullish momentum; crossing below = bearish.
+
+Fair value / volume:
+- vwap: rolling 24h volume-weighted average price — the intraday **fair-value anchor**. Price ABOVE VWAP = intraday buyers in control (long bias); BELOW = sellers in control (short bias). Stretched distance from VWAP often mean-reverts.
+- vwma: volume-weighted MA — confirms whether a move has real volume behind it.
+
+Momentum:
+- rsi: 14-bar RSI — intraday overbought (>70) / oversold (<30). Watch divergence vs price for reversals; in strong intraday trends it can stay extreme.
+- macd / macds / macdh: 12/26/9-bar MACD — crossovers and histogram flips flag intraday momentum shifts early.
+
+Volatility / levels:
+- boll / boll_ub / boll_lb: 20-bar Bollinger Bands — band tags flag intraday over-extension; squeezes precede breakouts.
+- atr: 14-bar ATR — current intraday volatility. Use it to judge whether a move is significant vs noise and how far a stop must realistically sit.
+
+Workflow: call get_stock_data first (recent {timeframe} OHLCV incl. VWAP), then get_indicators once per chosen indicator (exact names), then get_verified_market_snapshot for ground-truth values. Treat the verified snapshot as the source of truth for any exact price level or indicator value — never invent numbers, support/resistance bounces, or percentage moves.
+
+Then write a focused report for the NEXT 1–2 HOURS covering:
+- intraday trend & momentum (EMA9/21 alignment, MACD, RSI),
+- position vs VWAP (bias + how stretched),
+- key intraday levels: recent swing highs/lows, band edges, round numbers,
+- whether this is a breakout/continuation or a mean-reversion setup,
+- volatility (ATR) and the level that would invalidate the read.
+Be explicit about the short-term directional bias."""
+
+
+def create_market_analyst(llm):
+
+    def market_analyst_node(state):
+        intraday = bool(get_config().get("intraday"))
+        timeframe = get_config().get("intraday_timeframe", "15m")
+        instrument_context = get_instrument_context_from_state(state)
+
+        # Intraday injects the current time so the analyst anchors to "now".
+        if intraday:
+            now = datetime.now(timezone.utc).strftime("%H:%M")
+            current_date = f"{state['trade_date']} {now} UTC"
+        else:
+            current_date = state["trade_date"]
+
+        tools = [
+            get_stock_data,
+            get_indicators,
+            get_verified_market_snapshot,
+        ]
+
+        base_message = _intraday_system_message(timeframe) if intraday else _DAILY_SYSTEM_MESSAGE
+        system_message = (
+            base_message
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )

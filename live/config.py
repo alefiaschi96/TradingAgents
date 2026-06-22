@@ -124,7 +124,7 @@ class Config:
             x.strip() for x in _s("SHORT_SIGNALS", "Sell,Underweight").split(",") if x.strip()
         )
         analysts = tuple(
-            x.strip() for x in _s("ANALYSTS", "market,social,news").split(",") if x.strip()
+            x.strip() for x in _s("ANALYSTS", "market,news").split(",") if x.strip()
         )
 
         # Offline mode can never send orders: it has no authenticated session.

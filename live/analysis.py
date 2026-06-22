@@ -102,6 +102,18 @@ def build_config(cfg) -> dict:
             "core_stock_apis": "kraken",
             "technical_indicators": "kraken",
         }
+        # Surface the live trading scenario into the graph config so agents can
+        # read it via get_config() (see get_scenario_instruction): instrument,
+        # leverage, take-profit ratio, short permission and stop mode.
+        config["leverage"] = cfg.leverage
+        config["take_profit_rr"] = cfg.take_profit_rr
+        config["allow_short"] = cfg.allow_short
+        config["symbol"] = cfg.symbol
+        config["analysis_symbol"] = cfg.analysis_symbol
+        config["stop_mode"] = cfg.stop_mode
+        # Placeholder; run_analysis fills this with the live regime read just
+        # before building the graph (kept here so the key always exists).
+        config["regime_context"] = ""
     return config
 
 
@@ -113,6 +125,24 @@ def run_analysis(cfg, trade_date: str | None = None) -> tuple[str, dict]:
     """
     trade_date = trade_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     config = build_config(cfg)
+
+    # Higher-timeframe regime read, injected as INFORMATION into the agents'
+    # prompts (via get_scenario_instruction). Never vetoes anything; fails open
+    # to "" so a regime-fetch hiccup can't abort the analysis.
+    if cfg.intraday:
+        try:
+            from live.regime import get_regime_context
+
+            config["regime_context"] = get_regime_context(
+                cfg.symbol,
+                timeframe=cfg.regime_timeframe,
+                ema_period=cfg.regime_ema_period,
+            )
+            if config["regime_context"]:
+                logger.info("Regime context: %s", config["regime_context"])
+        except Exception as e:  # noqa: BLE001 - informational only, never block
+            logger.warning("Could not compute regime context (%s); continuing", e)
+            config["regime_context"] = ""
 
     logger.info(
         "Running analysis: %s on %s (provider=%s deep=%s quick=%s analysts=%s)",

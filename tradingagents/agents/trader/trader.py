@@ -11,6 +11,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_scenario_instruction,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
@@ -32,9 +33,13 @@ def create_trader(llm):
                 "content": (
                     "You are a trading agent analyzing market data to make investment decisions. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
-                    "Anchor your reasoning in the analysts' reports and the research plan."
+                    "Anchor your reasoning in the analysts' reports and the research plan. "
+                    "The system enters at MARKET and brackets every position with an automatic "
+                    "volatility-based stop and take-profit, so focus on direction and conviction "
+                    "rather than precise entry or stop levels the system will not use."
                     + get_language_instruction()
                     + get_horizon_instruction()
+                    + get_scenario_instruction()
                 ),
             },
             {
@@ -42,8 +47,8 @@ def create_trader(llm):
                 "content": (
                     f"Based on a comprehensive analysis by a team of analysts, here is an investment "
                     f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
-                    f"insights from current technical market trends, macroeconomic indicators, and "
-                    f"social media sentiment. Use this plan as a foundation for evaluating your next "
+                    f"the analysts' intraday technical read and any fresh catalysts. "
+                    f"Use this plan as a foundation for evaluating your next "
                     f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),

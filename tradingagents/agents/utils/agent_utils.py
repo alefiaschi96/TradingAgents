@@ -43,6 +43,8 @@ __all__ = [
     "resolve_instrument_identity",
     "get_instrument_context_from_state",
     "get_language_instruction",
+    "get_horizon_instruction",
+    "get_scenario_instruction",
     "create_msg_delete",
 ]
 
@@ -88,6 +90,69 @@ def get_horizon_instruction() -> str:
         f"or multi-day/multi-week theses; they are irrelevant on this horizon. It "
         f"is a short-term trade, not an investment."
     )
+
+
+def get_scenario_instruction() -> str:
+    """Return a prompt directive describing the concrete trading scenario.
+
+    In intraday mode (config ``intraday``) it spells out the mechanics the agents
+    are actually trading: a crypto perpetual future, the configured leverage,
+    that LONG / SHORT / FLAT are all available with FLAT as the default, and how
+    each position is sized and bracketed by an automatic stop and take-profit.
+    The text is built dynamically from the live config so it always matches the
+    deployed instrument and risk settings, and it prescribes NO strategy.
+    Returns empty string in daily mode so the default behavior is unchanged.
+    """
+    from tradingagents.dataflows.config import get_config
+    config = get_config()
+    if not config.get("intraday"):
+        return ""
+
+    symbol = config.get("symbol") or config.get("analysis_symbol")
+    instrument = f" ({symbol})" if symbol else ""
+
+    leverage = config.get("leverage")
+    try:
+        lev_txt = f" at {leverage:g}x leverage" if leverage else ""
+    except (TypeError, ValueError):
+        lev_txt = ""
+
+    rr = config.get("take_profit_rr")
+    try:
+        rr_txt = f"~{rr:g}x" if rr else "a multiple of"
+    except (TypeError, ValueError):
+        rr_txt = "a multiple of"
+
+    tf = config.get("intraday_timeframe", "15m")
+
+    if config.get("allow_short", True):
+        direction = (
+            "You may take a LONG or a SHORT with equal ease, or stay FLAT."
+        )
+    else:
+        direction = "You may take a LONG, or stay FLAT (shorts are disabled)."
+
+    scenario = (
+        f" SCENARIO: you trade a crypto PERPETUAL FUTURE{instrument}{lev_txt}, "
+        f"intraday on {tf} bars, holding ~1-2 hours. {direction} FLAT is the "
+        f"default and the correct choice whenever there is no clear directional "
+        f"edge — never take a position just to be active. Each position is sized "
+        f"automatically and bracketed by a volatility-based stop and a take-profit "
+        f"at {rr_txt} the stop distance, then left until one is hit; one position "
+        f"at a time. Reason only from intraday price action and fresh catalysts."
+    )
+
+    # Optional higher-timeframe regime read, injected as INFORMATION only. It
+    # prescribes nothing and vetoes nothing — the agent decides what to make of
+    # it. Empty when unavailable (fail-open).
+    regime_context = config.get("regime_context", "")
+    if regime_context:
+        scenario += (
+            f" CURRENT REGIME (informational, you decide what to do with it): "
+            f"{regime_context}"
+        )
+
+    return scenario
 
 
 def _clean_identity_value(value: Any) -> str | None:

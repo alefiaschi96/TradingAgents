@@ -15,6 +15,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_scenario_instruction,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
@@ -46,12 +47,14 @@ def create_portfolio_manager(llm):
 
 ---
 
-**Rating Scale** (use exactly one):
-- **Buy**: Strong conviction to enter or add to position
-- **Overweight**: Favorable outlook, gradually increase exposure
-- **Hold**: Maintain current position, no action needed
-- **Underweight**: Reduce exposure, take partial profits
-- **Sell**: Exit position or avoid entry
+**Rating Scale** (use exactly one) — each label is a DIRECTION plus a CONVICTION:
+- **Buy**: strong LONG - high conviction price goes UP
+- **Overweight**: mild LONG - lean long
+- **Hold**: FLAT - no position; this is the DEFAULT whenever the evidence does not clearly favour one direction
+- **Underweight**: mild SHORT - lean short
+- **Sell**: strong SHORT - high conviction price goes DOWN
+
+Pick the rating that matches the direction you would ACTUALLY take. Use Hold/FLAT freely - it is the right answer when there is no clear directional edge. Do NOT output a directional rating merely to act, and mild caution about an extended move is NOT itself a reason to bet the other way.
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
@@ -62,7 +65,7 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}{get_horizon_instruction()}"""
+Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}{get_horizon_instruction()}{get_scenario_instruction()}"""
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,

@@ -7,6 +7,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_scenario_instruction,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
@@ -29,19 +30,19 @@ def create_research_manager(llm):
 
 ---
 
-**Rating Scale** (use exactly one):
-- **Buy**: Strong conviction in the bull thesis; recommend taking or growing the position
-- **Overweight**: Constructive view; recommend gradually increasing exposure
-- **Hold**: Balanced view; recommend maintaining the current position
-- **Underweight**: Cautious view; recommend trimming exposure
-- **Sell**: Strong conviction in the bear thesis; recommend exiting or avoiding the position
+**Rating Scale** (use exactly one) — each label is a DIRECTION plus a CONVICTION:
+- **Buy**: strong LONG - high conviction price goes UP
+- **Overweight**: mild LONG - lean long
+- **Hold**: FLAT - no position; this is the DEFAULT whenever the evidence does not clearly favour one direction
+- **Underweight**: mild SHORT - lean short
+- **Sell**: strong SHORT - high conviction price goes DOWN
 
-Commit to a clear stance whenever the debate's strongest arguments warrant one; reserve Hold for situations where the evidence on both sides is genuinely balanced.
+Pick the rating that matches the direction you would ACTUALLY take. Use Hold/FLAT freely - it is the right answer when there is no clear directional edge. Do NOT output a directional rating merely to act, and mild caution about an extended move is NOT itself a reason to bet the other way.
 
 ---
 
 **Debate History:**
-{history}""" + get_language_instruction() + get_horizon_instruction()
+{history}""" + get_language_instruction() + get_horizon_instruction() + get_scenario_instruction()
 
         investment_plan = invoke_structured_or_freetext(
             structured_llm,

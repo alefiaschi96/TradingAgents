@@ -9,6 +9,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
+from tradingagents.agents.utils.futures_data_tools import (
+    get_funding_rate,
+    get_open_interest,
+    get_orderbook_imbalance,
+)
 from tradingagents.dataflows.config import get_config
 
 
@@ -66,6 +71,8 @@ Volatility / levels:
 - boll / boll_ub / boll_lb: 20-bar Bollinger Bands — band tags flag intraday over-extension; squeezes precede breakouts.
 - atr: 14-bar ATR — current intraday volatility. Use it to judge whether a move is significant vs noise and how far a stop must realistically sit.
 
+Futures market-structure (Kraken Futures, public): also call get_funding_rate, get_open_interest, and get_orderbook_imbalance for this symbol. Read them as: very positive/negative **funding** = the crowd is heavily on one side (squeeze risk against that side); **open interest** rising during a move = fresh money behind a "real" move, while falling OI = a fading move; an **order-book** skewed to bids/asks = short-term buying/selling pressure. These are positioning signals, not price levels — use only what the tools return and never fabricate values.
+
 Workflow: call get_stock_data first (recent {timeframe} OHLCV incl. VWAP), then get_indicators once per chosen indicator (exact names), then get_verified_market_snapshot for ground-truth values. Treat the verified snapshot as the source of truth for any exact price level or indicator value — never invent numbers, support/resistance bounces, or percentage moves.
 
 Then write a focused report for the NEXT 1–2 HOURS covering:
@@ -96,6 +103,15 @@ def create_market_analyst(llm):
             get_indicators,
             get_verified_market_snapshot,
         ]
+        # Intraday adds Kraken Futures market-structure tools (public, no keys):
+        # funding, open interest, and top-of-book imbalance. The daily path is
+        # untouched.
+        if intraday:
+            tools += [
+                get_funding_rate,
+                get_open_interest,
+                get_orderbook_imbalance,
+            ]
 
         base_message = _intraday_system_message(timeframe) if intraday else _DAILY_SYSTEM_MESSAGE
         system_message = (

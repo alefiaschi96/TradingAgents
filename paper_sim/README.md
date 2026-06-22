@@ -28,6 +28,10 @@ Stop with Ctrl-C — state is saved and resumes next time.
 
 No `tee` needed: each run writes its own log files automatically (see **Logs** below).
 
+**One command for daemon + dashboard:** `./scripts/start-paper.sh` activates the
+venv, loads `.env.live`, opens the browser dashboard, and runs the daemon under
+`caffeinate`. Ctrl-C stops both.
+
 ## Config (env vars, all optional)
 
 | Var | Default | Meaning |
@@ -54,8 +58,8 @@ JSON at `PAPER_STATE_PATH`.
 
 ## Logs (per-run, kept forever)
 
-Every run writes its own files under `~/.tradingagents/paper_sim/logs/` — old
-runs are never overwritten, so you always have the history to analyse:
+Every run writes its own files under `logs/paper_sim/` (inside the project) —
+old runs are never overwritten, so you always have the history to analyse:
 
 - `PF_SOLUSD-<YYYYMMDD-HHMMSS>-<pid>.log` — the full human-readable log (same
   lines that print to the terminal).
@@ -71,7 +75,7 @@ Analyse the structured stream, e.g.:
 
 ```bash
 jq -c 'select(.event=="close") | {ts,side,outcome,pnl,equity}' \
-  ~/.tradingagents/paper_sim/logs/latest.jsonl
+  logs/paper_sim/latest.jsonl
 ```
 
 ## Notes

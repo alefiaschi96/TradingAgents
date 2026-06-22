@@ -1,7 +1,7 @@
 """Per-run structured logging.
 
 Every process gets its OWN timestamped text log plus a machine-readable JSONL
-event stream, under ``~/.tradingagents/<component>/logs/`` (override with
+event stream, under ``<project>/logs/<component>/`` (override with
 ``PAPER_LOG_DIR``). Old runs are never overwritten, so the full history stays on
 disk for later analysis. Two stable symlinks — ``latest.log`` and
 ``latest.jsonl`` — always point at the current run, so the dashboards can find
@@ -27,8 +27,14 @@ import sys
 from datetime import datetime, timezone
 
 
+def _repo_root() -> str:
+    """Project root: run_logging.py lives in ``<repo>/live/``, so one dir up."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _default_log_dir(component: str) -> str:
-    return os.path.expanduser(f"~/.tradingagents/{component}/logs")
+    """Per-run logs live inside the project at ``<repo>/logs/<component>/``."""
+    return os.path.join(_repo_root(), "logs", component)
 
 
 def _slug(value) -> str:

@@ -33,11 +33,11 @@ def create_research_manager(llm):
 **Rating Scale** (use exactly one) — each label is a DIRECTION plus a CONVICTION:
 - **Buy**: strong LONG - high conviction price goes UP
 - **Overweight**: mild LONG - lean long
-- **Hold**: FLAT - no position; this is the DEFAULT whenever the evidence does not clearly favour one direction
+- **Hold**: FLAT - no position; for when the evidence on both sides is genuinely balanced (no edge either way)
 - **Underweight**: mild SHORT - lean short
 - **Sell**: strong SHORT - high conviction price goes DOWN
 
-Pick the rating that matches the direction you would ACTUALLY take. Use Hold/FLAT freely - it is the right answer when there is no clear directional edge. Do NOT output a directional rating merely to act, and mild caution about an extended move is NOT itself a reason to bet the other way.
+Pick the rating that matches the direction you would ACTUALLY take, and commit to a clear LONG or SHORT whenever the debate's strongest arguments warrant one. Reserve Hold/FLAT for genuinely balanced evidence — it is a real conclusion, not a default to avoid deciding. Two things that do NOT justify flipping direction: taking a position merely to be active, and mild caution about an extended move — trimming conviction is fine, but it is never a reason to bet the OTHER way.
 
 ---
 

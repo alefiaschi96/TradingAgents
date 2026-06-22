@@ -27,7 +27,8 @@ def create_bear_researcher(llm):
         )
 
         if get_config().get("intraday"):
-            prompt = f"""You are an intraday Bear Analyst building the SHORT case for the {target_label} over the NEXT 1-2 HOURS on 15-minute bars. This is a short-term trade, NOT a multi-day or multi-week investment. Your goal is to argue, with intraday price action, why the next 1-2 hours favor being short or flat, and to refute the intraday long case.
+            timeframe = get_config().get("intraday_timeframe", "15m")
+            prompt = f"""You are an intraday Bear Analyst building the SHORT case for the {target_label} over the NEXT 1-2 HOURS on {timeframe} bars. This is a short-term trade, NOT a multi-day or multi-week investment. Your goal is to argue, with intraday price action, why the next 1-2 hours favor being short or flat, and to refute the intraday long case.
 
 Key points to focus on:
 
@@ -35,6 +36,7 @@ Key points to focus on:
 - Rejection at VWAP / resistance: Emphasize price being rejected at or below VWAP (sellers in control), failure to reclaim VWAP, or stalling into intraday resistance, prior swing highs, round numbers, or the upper Bollinger band.
 - Breakdown of intraday levels: Point to loss of intraday support, lower-high / lower-low structure, breakdowns through recent swing lows, and failed bounces.
 - Exhaustion / over-extension: Note over-extension above VWAP or band tags that tend to mean-revert lower, climactic volume into highs, and thinning buy-side participation.
+- Futures positioning: Weigh the funding rate, open interest, and order-book imbalance from the market report — crowded-long funding, falling OI on the bounce, or an ask-skewed book confirm short conviction or supply squeeze fuel; flag crowded-short funding as contrarian squeeze-up risk against the short.
 - Long Counterpoints: Critically attack the bull's intraday long thesis with the price action — expose chases into resistance, weak-volume pushes, and bounces likely to fail within the next 1-2 hours.
 - Engagement: Present your argument in a conversational style, directly engaging with the bull analyst's points and debating effectively rather than simply listing facts.
 
@@ -44,7 +46,6 @@ Resources available:
 
 {instrument_context}
 Market research report (intraday technicals): {market_research_report}
-Social media sentiment report: {sentiment_report}
 Latest news / catalysts: {news_report}
 Conversation history of the debate: {history}
 Last bull argument: {current_response}

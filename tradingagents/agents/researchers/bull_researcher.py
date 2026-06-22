@@ -27,12 +27,14 @@ def create_bull_researcher(llm):
         )
 
         if get_config().get("intraday"):
-            prompt = f"""You are a Bull Analyst building the **intraday LONG case** for the {target_label} over the **next 1-2 hours** on 15-minute bars. This is a short-term trade, NOT a multi-day or multi-week investment. Your task is to argue that buyers are in control and that price is likely to push higher in the next couple of hours. Use the provided intraday data to make your case and to refute the intraday short case.
+            timeframe = get_config().get("intraday_timeframe", "15m")
+            prompt = f"""You are a Bull Analyst building the **intraday LONG case** for the {target_label} over the **next 1-2 hours** on {timeframe} bars. This is a short-term trade, NOT a multi-day or multi-week investment. Your task is to argue that buyers are in control and that price is likely to push higher in the next couple of hours. Use the provided intraday data to make your case and to refute the intraday short case.
 
 Key points to focus on:
 - Momentum Continuation: Argue that the current up-move has room to extend over the next 1-2 hours — rising momentum (MACD, RSI), expanding range, and recent higher highs/higher lows.
 - Trend Strength: Emphasize bullish trend alignment — price above EMA9 and EMA21, EMA9 above EMA21, and price holding above VWAP (intraday buyers in control).
 - Favorable Intraday Levels: Point to the price sitting above key intraday support (recent swing lows, VWAP, round numbers) with clear room to the next resistance, and breakout potential above recent swing highs or band edges.
+- Futures Positioning: Weigh the positioning signals — crowded-short (negative) funding plus rising open interest behind the up-move and a bid-skewed order book all confirm or even add squeeze fuel to the LONG, while strongly positive (crowded-long) funding is a contrarian risk to flag.
 - Bear Counterpoints: Critically rebut the intraday short case (overbought RSI, VWAP fade, mean-reversion) with specific price-action evidence, showing why upside continuation is the higher-probability read for the next 1-2 hours.
 - Risk Frame: Note the ATR-based level just below structure (e.g. below VWAP or the last swing low) that would invalidate the long thesis — without it, the trade is naked.
 - Engagement: Present your argument in a conversational style, engaging directly with the bear analyst's points and debating effectively rather than just listing data.
@@ -42,9 +44,7 @@ Do NOT use growth, revenue, valuation, scalability, or fundamentals framing — 
 Resources available:
 {instrument_context}
 Market research report: {market_research_report}
-Social media sentiment report: {sentiment_report}
 Latest world affairs news: {news_report}
-{fundamentals_label}: {fundamentals_report}
 Conversation history of the debate: {history}
 Last bear argument: {current_response}
 Use this information to deliver a compelling intraday bull argument, refute the bear's intraday short case, and engage in a dynamic debate that demonstrates the strength of the long position for the next 1-2 hours.

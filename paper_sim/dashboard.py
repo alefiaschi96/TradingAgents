@@ -23,8 +23,13 @@ from live.run_logging import default_text_log
 _STATE = os.path.expanduser(
     os.environ.get("PAPER_STATE_PATH", "~/.tradingagents/paper_sim/state.json")
 )
-# Default to the current run's log (latest.log); PAPER_LOG overrides.
-_LOG = os.environ.get("PAPER_LOG") or default_text_log("paper_sim")
+def _resolve_log() -> str:
+    """Resolve the current run's text log on EACH call, not once at import.
+
+    The dashboard is started just before the daemon, so latest.log may not exist
+    yet at startup; resolving per request lets it pick the log up as soon as the
+    daemon creates it (otherwise it sticks to the fallback path forever)."""
+    return os.environ.get("PAPER_LOG") or default_text_log("paper_sim")
 _STALE_MIN = float(os.environ.get("WATCH_STALE_MIN", "12"))
 _PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("DASHBOARD_PORT", "8765"))
 
@@ -140,6 +145,27 @@ def _price_path(lines: list[str], entry: float) -> list[float]:
     return pts[-120:]
 
 
+def _asset_name() -> str:
+    """Display name of the traded asset, from the env (PF_ADAUSD -> ADA).
+
+    Hardcoding "SOL" was wrong once we run multiple instruments; the launcher
+    exports SYMBOL per instance, so read it from there."""
+    import re
+    sym = (os.environ.get("ANALYSIS_SYMBOL") or os.environ.get("SYMBOL") or "").upper()
+    s = re.sub(r"^PF_", "", sym)
+    s = re.split(r"[-/]", s)[0]
+    s = re.sub(r"USD$", "", s)
+    return s or "il prezzo"
+
+
+def _fmt_price(x: float) -> str:
+    """Price with decimals adapted to magnitude (SOL ~73 -> 3dp, ADA ~0.16 -> 4dp),
+    so a low-priced asset doesn't collapse to '0.16'."""
+    a = abs(x)
+    d = 2 if a >= 100 else 3 if a >= 1 else 4 if a >= 0.01 else 6
+    return f"{x:.{d}f}"
+
+
 def _bet(op: dict | None, lines: list[str]) -> dict | None:
     if not op:
         return None
@@ -147,21 +173,22 @@ def _bet(op: dict | None, lines: list[str]) -> dict | None:
     entry, sl, tp = float(op.get("entry", 0)), float(op.get("sl", 0)), float(op.get("tp", 0))
     now = _current_price(lines)
     winning = None if now is None else (now > entry if up else now < entry)
+    asset = _asset_name()
     return {
         "up": up,
-        "dir_h": "Punta che SOL SALE" if up else "Punta che SOL SCENDE",
+        "dir_h": f"Punta che {asset} SALE" if up else f"Punta che {asset} SCENDE",
         "entry": entry, "stop": sl, "target": tp, "now": now, "winning": winning,
         "path": _price_path(lines, entry),
         "plain": (
-            f"Ha {'comprato' if up else 'venduto'} a {entry:.2f}. "
-            f"Chiude in GUADAGNO se SOL {'sale' if up else 'scende'} a {tp:.2f}; "
-            f"in PERDITA se {'scende' if up else 'sale'} a {sl:.2f}."
+            f"Ha {'comprato' if up else 'venduto'} a {_fmt_price(entry)}. "
+            f"Chiude in GUADAGNO se {asset} {'sale' if up else 'scende'} a {_fmt_price(tp)}; "
+            f"in PERDITA se {'scende' if up else 'sale'} a {_fmt_price(sl)}."
         ),
     }
 
 
 def _snapshot() -> dict:
-    lines = _tail_lines(_LOG)
+    lines = _tail_lines(_resolve_log())
     ts = _last_ts(lines)
     stale = False
     age = last_log = None
@@ -236,7 +263,7 @@ _REASON_FIELDS = [
 
 
 def _log_dir() -> str:
-    return os.path.dirname(os.path.abspath(_LOG))
+    return os.path.dirname(os.path.abspath(_resolve_log()))
 
 
 def _reasoning_records(limit: int = 30) -> list[dict]:
@@ -411,6 +438,8 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
 
 <script>
 const f=(x,d=2)=>x==null?"—":Number(x).toFixed(d);
+const fp=x=>{if(x==null)return"—";x=Number(x);const a=Math.abs(x);
+ const d=a>=100?2:a>=1?3:a>=0.01?4:6;return x.toFixed(d);};
 const clamp=x=>Math.max(0,Math.min(1,x));
 function icon(kind,up){
  const A='stroke="#0b1220" stroke-width="0"';
@@ -444,9 +473,9 @@ function chart(b){
    ${hl(b.target,'#34d399','4 3')}${hl(b.stop,'#fb7185','4 3')}${hl(b.entry,'#7b8aa0','2 4')}
    <polyline points="${line}" fill="none" stroke="#dbe6f5" stroke-width="2" vector-effect="non-scaling-stroke"/>
   </svg>`;
- const labs=`<div class="lab tp" style="top:${Y(b.target).toFixed(1)}%">🎯 obiettivo ${f(b.target)}</div>
-   <div class="lab sl" style="top:${Y(b.stop).toFixed(1)}%">🛑 stop ${f(b.stop)}</div>`+
-   (b.now!=null?`<div class="lab now" style="top:${Y(b.now).toFixed(1)}%;color:${b.winning?'#34d399':b.winning===false?'#fb7185':'#fff'}">ora ${f(b.now)}${b.winning==null?'':b.winning?' ✓':' ✕'}</div>`:'');
+ const labs=`<div class="lab tp" style="top:${Y(b.target).toFixed(1)}%">🎯 obiettivo ${fp(b.target)}</div>
+   <div class="lab sl" style="top:${Y(b.stop).toFixed(1)}%">🛑 stop ${fp(b.stop)}</div>`+
+   (b.now!=null?`<div class="lab now" style="top:${Y(b.now).toFixed(1)}%;color:${b.winning?'#34d399':b.winning===false?'#fb7185':'#fff'}">ora ${fp(b.now)}${b.winning==null?'':b.winning?' ✓':' ✕'}</div>`:'');
  return svg+labs;
 }
 

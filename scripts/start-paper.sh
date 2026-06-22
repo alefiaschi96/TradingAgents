@@ -37,8 +37,8 @@ cleanup() { kill "$DASH_PID" 2>/dev/null || true; }
 trap cleanup INT TERM EXIT
 
 echo "dashboard -> http://localhost:${PORT}   (logs: logs/paper_sim/)"
-sleep 1
-command -v open >/dev/null 2>&1 && open "http://localhost:${PORT}" 2>/dev/null || true
+# The dashboard process opens the browser itself (set DASHBOARD_OPEN=0 to disable);
+# we deliberately do NOT open it here too, or you'd get two tabs.
 
 # Daemon in the foreground, Mac kept awake. Ctrl-C lands here -> the daemon
 # saves state and exits -> the trap then stops the dashboard.

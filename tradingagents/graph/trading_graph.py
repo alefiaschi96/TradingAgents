@@ -27,6 +27,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
     resolve_instrument_identity,
 )
+from tradingagents.agents.utils.futures_data_tools import (
+    get_funding_rate,
+    get_open_interest,
+    get_orderbook_imbalance,
+)
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
@@ -171,6 +176,15 @@ class TradingAgentsGraph:
                     # LLM and required by its prompt; must be executable here or
                     # the call fails and the model reports it "unavailable").
                     get_verified_market_snapshot,
+                    # Futures market-structure tools (Kraken public): the intraday
+                    # market analyst binds and calls these, so they MUST be
+                    # executable here too — otherwise every call errors with
+                    # "not a valid tool" and the funding/OI/order-book data never
+                    # reaches the report. Harmless on the daily path (not bound
+                    # to that analyst's LLM, so never called).
+                    get_funding_rate,
+                    get_open_interest,
+                    get_orderbook_imbalance,
                 ]
             ),
             "social": ToolNode(

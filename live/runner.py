@@ -77,8 +77,13 @@ def run_once() -> dict:
     if cancelled:
         _emit("orphan_cleanup", cancelled=cancelled)
 
-    from live.analysis import run_analysis  # heavy import (LLM stack)
-    rating, _state = run_analysis(cfg)
+    from live.analysis import reasoning_from_state, run_analysis  # heavy import (LLM stack)
+    rating, full_state = run_analysis(cfg)
+
+    # Persist the full agent reasoning to the per-run JSONL (not the text log —
+    # it's large). Otherwise the chain is only printed to stdout and lost.
+    if _run_logger is not None:
+        _run_logger.event("analysis", rating=rating, **reasoning_from_state(full_state))
 
     # 4. Decision -> side.
     side = guards.map_decision_to_side(rating, cfg)

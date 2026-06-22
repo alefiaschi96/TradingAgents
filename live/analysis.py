@@ -198,3 +198,31 @@ def run_analysis(cfg, trade_date: str | None = None) -> tuple[str, dict]:
         f"Analysis failed after {attempts} attempt(s) due to transient "
         f"network errors; last was {type(last_err).__name__}: {last_err}"
     ) from last_err
+
+
+def reasoning_from_state(state: dict | None) -> dict:
+    """Pull every agent's reasoning out of a final graph state, flattened for
+    structured (JSONL) logging.
+
+    The full chain is otherwise discarded after ``run_analysis`` returns and
+    only printed to stdout, so old runs aren't analysable. This captures, per
+    decision: the market + news reports, the bull/bear case and the research
+    manager's verdict, the trader's proposal, the three risk debaters, and the
+    Portfolio Manager's final decision. Every field is best-effort — a partial
+    state (e.g. after an error) just yields empty strings, never raises.
+    """
+    state = state or {}
+    debate = state.get("investment_debate_state") or {}
+    risk = state.get("risk_debate_state") or {}
+    return {
+        "market_report": state.get("market_report", ""),
+        "news_report": state.get("news_report", ""),
+        "bull_case": debate.get("bull_history", ""),
+        "bear_case": debate.get("bear_history", ""),
+        "research_manager_plan": state.get("investment_plan", ""),
+        "trader_proposal": state.get("trader_investment_plan", ""),
+        "risk_aggressive": risk.get("aggressive_history", ""),
+        "risk_conservative": risk.get("conservative_history", ""),
+        "risk_neutral": risk.get("neutral_history", ""),
+        "pm_decision": state.get("final_trade_decision", ""),
+    }

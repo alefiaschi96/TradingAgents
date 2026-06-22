@@ -13,7 +13,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from live.analysis import run_analysis
+from live.analysis import reasoning_from_state, run_analysis
 from live.bridge import _bracket_prices
 from live.config import Config
 from live.guards import map_decision_to_side
@@ -277,8 +277,11 @@ class PaperSimulator:
     # ------------------------------------------------------------- decide
     def maybe_decide(self, now_ts: float) -> None:
         """Run the analysis; open a simulated position if it says long/short."""
-        rating, _state = run_analysis(self.cfg)
+        rating, state = run_analysis(self.cfg)
         self.state["last_decision_at"] = now_ts
+        # Persist the full agent reasoning (market/news/debate/PM) to the JSONL,
+        # always — it is otherwise only printed to stdout and lost.
+        self._emit_event("analysis", rating=rating, **reasoning_from_state(state))
         side = map_decision_to_side(rating, self.cfg)
         if side is None:
             logger.info("decision %s -> no entry (stay flat)", rating)

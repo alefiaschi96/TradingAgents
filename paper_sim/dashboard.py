@@ -5,7 +5,7 @@
 
 Pure standard library (http.server) — no pip installs. The page auto-refreshes
 and explains in plain Italian what the bot is doing, so anyone can follow it.
-Reads the same state.json + paper_sim.log the simulator writes. Ctrl-C to stop.
+Reads the same state.json + the current run's log the simulator writes. Ctrl-C to stop.
 Bound to localhost only (not exposed to the network).
 """
 
@@ -17,10 +17,13 @@ import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from live.run_logging import default_text_log
+
 _STATE = os.path.expanduser(
     os.environ.get("PAPER_STATE_PATH", "~/.tradingagents/paper_sim/state.json")
 )
-_LOG = os.environ.get("PAPER_LOG", "paper_sim.log")
+# Default to the current run's log (latest.log); PAPER_LOG overrides.
+_LOG = os.environ.get("PAPER_LOG") or default_text_log("paper_sim")
 _STALE_MIN = float(os.environ.get("WATCH_STALE_MIN", "12"))
 _PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("DASHBOARD_PORT", "8765"))
 

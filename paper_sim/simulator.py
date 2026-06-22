@@ -54,6 +54,7 @@ class PaperSimulator:
         fee_pct_per_side: float,
         decision_interval_min: float,
         slippage_pct_per_side: float = 0.0,
+        event_sink=None,
     ):
         self.cfg = cfg
         self.state_path = state_path
@@ -63,6 +64,9 @@ class PaperSimulator:
         self.kraken = KrakenClient(cfg, "", "")  # no keys: public price/markets only
         self.state = self._load(start_equity)
         self._last_regime_log = None  # throttles the "regime ready/not ready" log line
+        # Structured per-run event stream (JSONL). No-op when unset so the
+        # simulator stays usable/testable without a run logger.
+        self._emit_event = event_sink if event_sink is not None else (lambda *a, **k: None)
 
     def connect(self) -> None:
         # Force public-only mode so price/markets need no API keys.
@@ -278,12 +282,19 @@ class PaperSimulator:
         side = map_decision_to_side(rating, self.cfg)
         if side is None:
             logger.info("decision %s -> no entry (stay flat)", rating)
+            self._emit_event("decision", rating=rating, side=None, action="flat")
             return
         allowed, reason = self._regime_gate(side)
         if not allowed:
             logger.info("decision %s (%s) -> VETOED by regime gate: %s", rating, side, reason)
+            self._emit_event(
+                "decision", rating=rating, side=side, action="vetoed", veto_reason=reason
+            )
             return
         logger.info("regime gate OK: %s (%s) -> %s", rating, side, reason)
+        self._emit_event(
+            "decision", rating=rating, side=side, action="open", regime_reason=reason
+        )
         self.open_position(side, rating)
 
     def _fill_price(self, price: float, fill_side: str) -> float:
@@ -322,6 +333,12 @@ class PaperSimulator:
             "(stop %.2f%% x rr %.1f, mode %s) | equity %.2f",
             side, self.cfg.symbol, entry, ref_price, self.slippage, size, sl, tp,
             stop_pct, rr, self.cfg.stop_mode, equity,
+        )
+        self._emit_event(
+            "open", symbol=self.cfg.symbol, side=side, rating=rating, entry=entry,
+            ref_price=ref_price, slip_pct=self.slippage, size=size, sl=sl, tp=tp,
+            stop_pct=stop_pct, rr=rr, stop_mode=self.cfg.stop_mode, notional=notional,
+            equity=equity,
         )
 
     # ------------------------------------------------------------- monitor
@@ -369,6 +386,12 @@ class PaperSimulator:
             "CLOSE %s via %s @ %.4f (trigger %.4f) | pnl %+.2f (gross %+.2f, fees %.2f) | equity %.2f | W/L %d/%d",
             side, reason, exit_price, trigger_price, net, gross, fees, self.state["equity"],
             self.state["wins"], self.state["losses"],
+        )
+        self._emit_event(
+            "close", symbol=self.cfg.symbol, side=side, rating=pos.get("rating"),
+            outcome=reason, exit=exit_price, trigger=trigger_price, pnl=net,
+            gross=gross, fees=fees, equity=self.state["equity"],
+            wins=self.state["wins"], losses=self.state["losses"],
         )
 
     def summary(self) -> str:

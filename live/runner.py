@@ -18,26 +18,26 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 
 from live.config import Config
+from live.run_logging import setup_run_logging
 from live import bridge, guards
-
-
-def _setup_logging() -> None:
-    logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s | %(message)s",
-        stream=sys.stdout,
-    )
 
 
 log = logging.getLogger("live.runner")
 
+# Per-run JSONL event stream, set by main(). The live runner is a cron tick
+# (start → one decision → exit), so a "day" bucket keeps each day's ticks in one
+# file instead of spraying a file per tick.
+_run_logger = None
+
 
 def _emit(event: str, **fields) -> None:
-    """One-line structured log so Railway logs stay greppable / parseable."""
+    """One-line structured log so Railway logs stay greppable / parseable, and a
+    mirror into the per-run JSONL stream for later analysis."""
     log.info("EVENT %s %s", event, json.dumps(fields, default=str))
+    if _run_logger is not None:
+        _run_logger.event(event, **fields)
 
 
 def run_once() -> dict:
@@ -99,7 +99,8 @@ def run_once() -> dict:
 
 
 def main() -> int:
-    _setup_logging()
+    global _run_logger
+    _run_logger = setup_run_logging("live", symbol=os.environ.get("SYMBOL"), bucket="day")
     try:
         outcome = run_once()
         _emit("done", status=outcome.get("status"))

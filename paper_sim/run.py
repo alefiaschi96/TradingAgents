@@ -12,24 +12,23 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import time
 
 from live.config import Config
+from live.run_logging import setup_run_logging
 from paper_sim.simulator import PaperSimulator
 
 _DEFAULT_STATE = os.path.expanduser("~/.tradingagents/paper_sim/state.json")
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s | %(message)s",
-        stream=sys.stdout,
-    )
+    cfg = Config.from_env()
+
+    # One timestamped text log + JSONL event stream per run (this daemon = one
+    # "session"); old runs are kept under ~/.tradingagents/paper_sim/logs/.
+    run_log = setup_run_logging("paper_sim", symbol=cfg.symbol, meta=cfg.summary())
     log = logging.getLogger("paper_sim.run")
 
-    cfg = Config.from_env()
     sim = PaperSimulator(
         cfg,
         state_path=os.environ.get("PAPER_STATE_PATH", _DEFAULT_STATE),
@@ -37,6 +36,7 @@ def main() -> int:
         fee_pct_per_side=float(os.environ.get("FEE_PCT_PER_SIDE", "0.05")),
         slippage_pct_per_side=float(os.environ.get("SLIPPAGE_PCT_PER_SIDE", "0.02")),
         decision_interval_min=float(os.environ.get("DECISION_INTERVAL_MIN", "40")),
+        event_sink=run_log.event,
     )
     monitor_interval = float(os.environ.get("MONITOR_INTERVAL_SEC", "60"))
 
@@ -59,6 +59,7 @@ def main() -> int:
         except KeyboardInterrupt:
             log.info("stopping — state saved")
             sim.save()
+            run_log.close(summary=sim.summary())
             return 0
         except Exception as e:  # noqa: BLE001 - daemon must survive transient errors
             log.exception("loop error (continuing): %s", e)

@@ -188,4 +188,9 @@ class Config:
             "deep_model": self.deep_model,
             "quick_model": self.quick_model,
             "analysts": list(self.analysts),
+            "intraday": self.intraday,
+            "intraday_timeframe": self.intraday_timeframe,
+            "stop_mode": self.stop_mode,
+            "take_profit_rr": self.take_profit_rr,
+            "regime_filter": self.regime_filter,
         }

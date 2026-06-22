@@ -1,7 +1,7 @@
 """Live, compact dashboard for the paper-sim — run it in a SECOND terminal:
 
-    python -m paper_sim.watch                 # uses ./paper_sim.log
-    python -m paper_sim.watch /path/to.log    # custom log path
+    python -m paper_sim.watch                 # follows the current run (latest.log)
+    python -m paper_sim.watch /path/to.log    # tail a specific / older run
 
 Reads the state file (the numbers) and tails only the key lines of the log
 (decisions, vetoes, opens/closes, regime changes). No network, no extra deps.
@@ -17,10 +17,14 @@ import sys
 import time
 from datetime import datetime
 
+from live.run_logging import default_text_log
+
 _STATE = os.path.expanduser(
     os.environ.get("PAPER_STATE_PATH", "~/.tradingagents/paper_sim/state.json")
 )
-_LOG = sys.argv[1] if len(sys.argv) > 1 else "paper_sim.log"
+# Default to the current run's log (latest.log symlink in the run-log dir);
+# pass an explicit path to tail an older run.
+_LOG = sys.argv[1] if len(sys.argv) > 1 else default_text_log("paper_sim")
 _REFRESH = float(os.environ.get("WATCH_REFRESH_SEC", "5"))
 _STALE_MIN = float(os.environ.get("WATCH_STALE_MIN", "12"))  # warn if no log for this long
 

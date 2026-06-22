@@ -26,6 +26,8 @@ python -m paper_sim.run
 
 Stop with Ctrl-C — state is saved and resumes next time.
 
+No `tee` needed: each run writes its own log files automatically (see **Logs** below).
+
 ## Config (env vars, all optional)
 
 | Var | Default | Meaning |
@@ -49,6 +51,28 @@ Live log lines:
 
 Full history (every closed trade with entry/exit/outcome/pnl) is in the state
 JSON at `PAPER_STATE_PATH`.
+
+## Logs (per-run, kept forever)
+
+Every run writes its own files under `~/.tradingagents/paper_sim/logs/` — old
+runs are never overwritten, so you always have the history to analyse:
+
+- `PF_SOLUSD-<YYYYMMDD-HHMMSS>-<pid>.log` — the full human-readable log (same
+  lines that print to the terminal).
+- `PF_SOLUSD-<YYYYMMDD-HHMMSS>-<pid>.jsonl` — one JSON object per event
+  (`run_start`, `decision`, `open`, `close`, `run_stop`) with a UTC timestamp,
+  ready for `jq`/pandas analysis across runs.
+- `latest.log` / `latest.jsonl` — symlinks to the current run, so the dashboards
+  always find it.
+
+Override the directory with `PAPER_LOG_DIR`. The dashboards default to the
+current run; tail an older one with `python -m paper_sim.watch <path-to.log>`.
+Analyse the structured stream, e.g.:
+
+```bash
+jq -c 'select(.event=="close") | {ts,side,outcome,pnl,equity}' \
+  ~/.tradingagents/paper_sim/logs/latest.jsonl
+```
 
 ## Notes
 

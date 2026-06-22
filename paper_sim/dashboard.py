@@ -11,6 +11,7 @@ Bound to localhost only (not exposed to the network).
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import sys
@@ -219,6 +220,66 @@ def _snapshot() -> dict:
     return snap
 
 
+# --- Reasoning page (separate from the main dashboard) --------------------
+_REASON_FIELDS = [
+    ("Market analyst (tecnica intraday)", "market_report"),
+    ("News / catalizzatori", "news_report"),
+    ("Toro — tesi rialzista", "bull_case"),
+    ("Orso — tesi ribassista", "bear_case"),
+    ("Research manager", "research_manager_plan"),
+    ("Trader (proposta)", "trader_proposal"),
+    ("Rischio · aggressivo", "risk_aggressive"),
+    ("Rischio · conservativo", "risk_conservative"),
+    ("Rischio · neutrale", "risk_neutral"),
+    ("Portfolio Manager — decisione finale", "pm_decision"),
+]
+
+
+def _log_dir() -> str:
+    return os.path.dirname(os.path.abspath(_LOG))
+
+
+def _reasoning_records(limit: int = 30) -> list[dict]:
+    """Collect the ``analysis`` events (full agent reasoning) across ALL run
+    files in the log dir, most recent first.
+
+    Reading every run's JSONL (not just the current one) means the reasoning
+    history survives restarts — each restart writes a new file, and the analysis
+    behind the currently-open trade often lives in an earlier one.
+    """
+    recs: list[dict] = []
+    for path in glob.glob(os.path.join(_log_dir(), "*.jsonl")):
+        if os.path.islink(path):  # skip latest.jsonl so we don't double-count
+            continue
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if r.get("event") != "analysis":
+                        continue
+                    ts = str(r.get("ts", ""))
+                    recs.append({
+                        "iso": ts,  # ISO sorts chronologically as a string
+                        "date": ts[:10],
+                        "ts": ts[11:19],
+                        "rating": r.get("rating"),
+                        "sections": [
+                            {"label": label, "text": (r.get(key) or "").strip()}
+                            for label, key in _REASON_FIELDS
+                        ],
+                    })
+        except OSError:
+            continue
+    recs.sort(key=lambda x: x["iso"], reverse=True)
+    return recs[:limit]
+
+
 _PAGE = r"""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Il mio bot · come va</title>
@@ -314,6 +375,7 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
 .chip.win{background:rgba(52,211,153,.15);color:var(--green)}
 .chip.loss{background:rgba(251,113,133,.15);color:var(--red)}
 </style></head><body>
+<a href="/reasoning" style="position:fixed;top:14px;right:16px;z-index:20;background:#1b2740;border:1px solid #2b3a52;color:#cdd9ee;padding:7px 12px;border-radius:9px;text-decoration:none;font-size:13px;font-weight:700">🧠 Ragionamenti →</a>
 <div class="app">
 
   <div class="hero card" id="hero" data-a="slate">
@@ -430,6 +492,64 @@ tick();setInterval(tick,3000);
 </script></body></html>"""
 
 
+_REASONING_PAGE = r"""<!doctype html><html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ragionamento degli analisti</title>
+<style>
+:root{--bg:#070b12;--card:#101826;--line:#1f2a3b;--txt:#eaf1fb;--dim:#8696ad;
+ --green:#34d399;--red:#fb7185;--flat:#8696ad;--accent:#8aa2ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);
+ font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:18px 16px 60px}
+.wrap{max-width:1000px;margin:0 auto}
+.top{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.top h1{font-size:18px;margin:0}
+a.back{color:var(--accent);text-decoration:none;font-weight:700;font-size:14px}
+.dim{color:var(--dim)}
+.acard{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:16px 0}
+.ahead{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+.rb{padding:3px 11px;border-radius:8px;font-weight:800;font-size:13px}
+.r-up{background:rgba(52,211,153,.16);color:var(--green)}
+.r-down{background:rgba(251,113,133,.16);color:var(--red)}
+.r-flat{background:rgba(134,150,173,.16);color:var(--flat)}
+.ats{color:var(--dim);font-variant-numeric:tabular-nums;font-size:13px}
+details{border-top:1px solid var(--line);padding:5px 0}
+details summary{cursor:pointer;font-weight:600;color:#cdd9ee;list-style:none;padding:4px 0}
+details summary::-webkit-details-marker{display:none}
+details summary::before{content:"\25B8  ";color:var(--accent)}
+details[open] summary::before{content:"\25BE  "}
+pre{white-space:pre-wrap;word-wrap:break-word;margin:8px 0 4px;padding:10px 12px;
+ background:#0b1320;border:1px solid var(--line);border-radius:8px;color:#dbe6f5;
+ font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+</style></head><body>
+<div class="wrap">
+ <div class="top"><a class="back" href="/">&larr; Dashboard</a><h1>&#129504; Ragionamento degli analisti</h1></div>
+ <p class="dim" id="meta">caricamento…</p>
+ <div id="list"></div>
+</div>
+<script>
+function rcls(r){r=(r||'').toLowerCase();
+ if(r==='buy'||r==='overweight')return 'r-up';
+ if(r==='sell'||r==='underweight')return 'r-down';return 'r-flat';}
+function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+async function load(){
+ let recs;try{recs=await(await fetch('/api/reasoning')).json();}
+ catch(e){document.getElementById('meta').textContent='Dashboard scollegata…';return;}
+ const meta=document.getElementById('meta');
+ if(!recs.length){meta.textContent='Ancora nessuna analisi registrata in questo run.';
+  document.getElementById('list').innerHTML='';return;}
+ meta.textContent=recs.length+' analisi · la più recente in alto · si aggiorna ogni 5s';
+ document.getElementById('list').innerHTML=recs.map((r,ri)=>`
+  <div class="acard">
+   <div class="ahead"><span class="rb ${rcls(r.rating)}">${r.rating||'—'}</span>
+    <span class="ats">${r.date} ${r.ts}</span></div>
+   ${r.sections.map(s=>`<details ${ri===0?'open':''}><summary>${s.label}${s.text?'':' · (vuoto)'}</summary><pre>${esc(s.text)||'(vuoto)'}</pre></details>`).join('')}
+  </div>`).join('');
+}
+load();setInterval(load,5000);
+</script></body></html>"""
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _send(self, body: bytes, ctype: str) -> None:
         self.send_response(200)
@@ -439,8 +559,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if self.path.startswith("/api"):
+        if self.path.startswith("/api/reasoning"):
+            self._send(json.dumps(_reasoning_records(), default=str).encode(), "application/json")
+        elif self.path.startswith("/api"):
             self._send(json.dumps(_snapshot(), default=str).encode(), "application/json")
+        elif self.path.startswith("/reasoning"):
+            self._send(_REASONING_PAGE.encode("utf-8"), "text/html; charset=utf-8")
         else:
             self._send(_PAGE.encode("utf-8"), "text/html; charset=utf-8")
 

@@ -65,13 +65,25 @@ def _msg(ln: str) -> str:
     return (ln.split(" | ", 1)[1] if " | " in ln else ln).strip()
 
 
+def _state_ts(iso: str) -> str:
+    """Format a state timestamp as 'DD/MM HH:MM:SS' in LOCAL time.
+
+    State timestamps are UTC (_now_iso) while the text log is local time, so
+    without converting, the closed-trades table was off by the UTC offset versus
+    the 'Ultime mosse' list (e.g. 12:02 vs 14:02 in CEST)."""
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%d/%m %H:%M:%S")
+    except (ValueError, TypeError):
+        return str(iso)[11:19]
+
+
 def _humanize(lines: list[str]) -> list[dict]:
     """Turn key log lines into plain-Italian one-liners with a colour 'kind'."""
     out: list[dict] = []
     for ln in lines:
         m = _msg(ln)
         low = m.lower()
-        t = ln[11:19] if len(ln) >= 19 and ln[4:5] == "-" else ""
+        t = (ln[8:10] + "/" + ln[5:7] + " " + ln[11:19]) if len(ln) >= 19 and ln[4:5] == "-" else ""
         h = k = None
         if "monitor open" in low:
             continue
@@ -194,7 +206,7 @@ def _snapshot() -> dict:
     age = last_log = None
     if ts is not None:
         age = (datetime.now() - ts).total_seconds() / 60.0
-        last_log = ts.strftime("%H:%M:%S")
+        last_log = ts.strftime("%d/%m %H:%M:%S")
         stale = age >= _STALE_MIN
 
     s = None
@@ -223,7 +235,7 @@ def _snapshot() -> dict:
             bet=_bet(s.get("open"), lines),
             closed=[
                 {
-                    "at": str(t.get("closed_at", ""))[11:19],
+                    "at": _state_ts(t.get("closed_at", "")),
                     "up": t.get("side") == "buy",
                     "win": (t.get("pnl", 0) or 0) >= 0,
                     "pnl": t.get("pnl"),
@@ -393,7 +405,7 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
 .ev .d.open{background:var(--blue)}.ev .d.win{background:var(--green)}.ev .d.loss{background:var(--red)}
 .ev .d.veto{background:var(--amber)}.ev .d.ok{background:var(--green)}.ev .d.warn{background:var(--amber)}
 .ev .d.dec{background:var(--accent)}.ev .d.think{background:var(--blue)}
-.ev .t{color:var(--dim);font-variant-numeric:tabular-nums;flex:0 0 54px;font-size:12.5px}
+.ev .t{color:var(--dim);font-variant-numeric:tabular-nums;flex:0 0 92px;font-size:12px;white-space:nowrap}
 .tbl{width:100%;border-collapse:collapse;font-size:13px}
 .tbl th,.tbl td{padding:7px 10px;text-align:left}
 .tbl thead th{position:sticky;top:0;background:#101826;color:var(--dim);font-weight:600;font-size:10px;letter-spacing:.07em;text-transform:uppercase}
@@ -430,7 +442,7 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
     <div class="col right">
       <div class="panel card"><h2>Ultime mosse</h2><ul class="ev scroll" id="events"></ul></div>
       <div class="panel card"><h2>Operazioni chiuse</h2>
-        <div class="scroll"><table class="tbl"><thead><tr><th>Ora</th><th>Tipo</th><th>Esito</th><th>Risultato</th></tr></thead>
+        <div class="scroll"><table class="tbl"><thead><tr><th>Quando</th><th>Tipo</th><th>Esito</th><th>Risultato</th></tr></thead>
         <tbody id="closed"></tbody></table></div></div>
     </div>
   </div>

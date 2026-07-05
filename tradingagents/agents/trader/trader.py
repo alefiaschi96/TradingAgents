@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 import functools
+import logging
 
 from langchain_core.messages import AIMessage
 
-from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
+from tradingagents.agents.schemas import (
+    TraderProposal,
+    extract_trader_params,
+    render_trader_proposal,
+)
 from tradingagents.agents.utils.agent_utils import (
     get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
     get_scenario_instruction,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext,
-)
+from tradingagents.agents.utils.structured import bind_structured
+
+logger = logging.getLogger(__name__)
 
 
 def create_trader(llm):
@@ -34,9 +38,18 @@ def create_trader(llm):
                     "You are a trading agent analyzing market data to make investment decisions. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
                     "Anchor your reasoning in the analysts' reports and the research plan. "
-                    "The system enters at MARKET and brackets every position with an automatic "
-                    "volatility-based stop and take-profit, so focus on direction and conviction "
-                    "rather than precise entry or stop levels the system will not use."
+                    "In addition to the direction, you MUST specify concrete risk-management "
+                    "parameters for the position:\n"
+                    "  • stop_loss_pct — stop-loss distance as a % of entry (typical 0.2–2.0)\n"
+                    "  • take_profit_rr — reward:risk ratio for the take-profit (typical 1.0–4.0)\n"
+                    "  • balance_pct — fraction of equity to commit as margin, 0.0–1.0 "
+                    "(e.g. 0.5 = use 50%)\n"
+                    "  • stop_mode — 'fixed' (use stop_loss_pct) or 'atr' (volatility-scaled)\n"
+                    "  • stop_atr_mult — ATR multiplier when stop_mode is 'atr' (typical 1.0–3.0)\n"
+                    "Choose values that reflect the current volatility regime, conviction level, "
+                    "and risk/reward of the setup. Tighter stops and smaller sizing for low-"
+                    "conviction or choppy setups; wider stops and larger sizing when the edge "
+                    "is clear and the trend is strong."
                     + get_language_instruction()
                     + get_horizon_instruction()
                     + get_scenario_instruction()
@@ -55,17 +68,32 @@ def create_trader(llm):
             },
         ]
 
-        trader_plan = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            messages,
-            render_trader_proposal,
-            "Trader",
-        )
+        # Structured path: extract both the rendered markdown AND the
+        # machine-readable risk params from the Pydantic model.
+        trader_plan: str | None = None
+        trader_params: dict = {}
+
+        if structured_llm is not None:
+            try:
+                proposal: TraderProposal = structured_llm.invoke(messages)
+                trader_plan = render_trader_proposal(proposal)
+                trader_params = extract_trader_params(proposal)
+            except Exception as exc:
+                logger.warning(
+                    "Trader: structured-output invocation failed (%s); "
+                    "retrying once as free text",
+                    exc,
+                )
+
+        # Free-text fallback: no structured params available.
+        if trader_plan is None:
+            response = llm.invoke(messages)
+            trader_plan = response.content
 
         return {
             "messages": [AIMessage(content=trader_plan)],
             "trader_investment_plan": trader_plan,
+            "trader_params": trader_params,
             "sender": name,
         }
 

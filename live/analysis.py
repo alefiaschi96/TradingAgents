@@ -221,6 +221,7 @@ def reasoning_from_state(state: dict | None) -> dict:
         "bear_case": debate.get("bear_history", ""),
         "research_manager_plan": state.get("investment_plan", ""),
         "trader_proposal": state.get("trader_investment_plan", ""),
+        "trader_params": state.get("trader_params") or {},
         "risk_aggressive": risk.get("aggressive_history", ""),
         "risk_conservative": risk.get("conservative_history", ""),
         "risk_neutral": risk.get("neutral_history", ""),

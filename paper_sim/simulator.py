@@ -265,14 +265,33 @@ class PaperSimulator:
         else:
             logger.info("regime not ready — holding off (no LLM): %s", reason)
 
-    def _effective_stop_pct(self, entry: float) -> float:
-        """Stop distance as a percent of entry: fixed, or scaled to ATR."""
-        if self.cfg.stop_mode.lower() != "atr" or entry <= 0:
-            return self.cfg.stop_pct
+    def _effective_stop_pct(
+        self,
+        entry: float,
+        *,
+        stop_mode: str | None = None,
+        stop_loss_pct: float | None = None,
+        stop_atr_mult: float | None = None,
+    ) -> float:
+        """Stop distance as a percent of entry: fixed, or scaled to ATR.
+
+        When AI-decided overrides are supplied they take precedence over the
+        env-config defaults; otherwise the config values are used as before.
+        """
+        mode = (stop_mode or self.cfg.stop_mode).lower()
+        base_pct = stop_loss_pct if stop_loss_pct is not None else self.cfg.stop_pct
+        if mode != "atr" or entry <= 0:
+            return base_pct
         atr = self._atr()
         if not atr:
-            return self.cfg.stop_pct
-        return (self.cfg.stop_atr_mult * atr / entry) * 100.0
+            return base_pct
+        mult = stop_atr_mult if stop_atr_mult is not None else self.cfg.stop_atr_mult
+        return (mult * atr / entry) * 100.0
+
+    # ------------------------------------------------------------- clamp
+    @staticmethod
+    def _clamp(value: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, value))
 
     # ------------------------------------------------------------- decide
     def maybe_decide(self, now_ts: float) -> None:
@@ -298,7 +317,8 @@ class PaperSimulator:
         self._emit_event(
             "decision", rating=rating, side=side, action="open", regime_reason=reason
         )
-        self.open_position(side, rating)
+        trader_params = state.get("trader_params") or {}
+        self.open_position(side, rating, trader_params=trader_params)
 
     def _fill_price(self, price: float, fill_side: str) -> float:
         """Adverse-slippage fill for a market order: a buy fills higher, a sell
@@ -307,41 +327,74 @@ class PaperSimulator:
         slip = self.slippage / 100.0
         return price * (1.0 + slip) if fill_side == "buy" else price * (1.0 - slip)
 
-    def open_position(self, side: str, rating: str) -> None:
+    def open_position(self, side: str, rating: str, *, trader_params: dict | None = None) -> None:
+        tp = trader_params or {}
         ref_price = self.last_price()
         entry = self._fill_price(ref_price, side)  # market entry slips against us
         equity = self.state["equity"]
-        margin = equity * self.cfg.balance_pct
+
+        # --- AI-decided overrides (clamped to safe bounds) ----------------
+        ai_balance_pct = tp.get("balance_pct")
+        if ai_balance_pct is not None:
+            ai_balance_pct = self._clamp(float(ai_balance_pct), 0.05, 1.0)
+        balance_pct = ai_balance_pct if ai_balance_pct is not None else self.cfg.balance_pct
+
+        ai_stop_loss_pct = tp.get("stop_loss_pct")
+        if ai_stop_loss_pct is not None:
+            ai_stop_loss_pct = self._clamp(float(ai_stop_loss_pct), 0.1, 5.0)
+
+        ai_rr = tp.get("take_profit_rr")
+        if ai_rr is not None:
+            ai_rr = self._clamp(float(ai_rr), 0.5, 10.0)
+        rr = ai_rr if ai_rr is not None else self.cfg.take_profit_rr
+
+        ai_stop_mode = tp.get("stop_mode")
+        if ai_stop_mode is not None and ai_stop_mode not in ("fixed", "atr"):
+            ai_stop_mode = None  # invalid value -> fall back to config
+
+        ai_stop_atr_mult = tp.get("stop_atr_mult")
+        if ai_stop_atr_mult is not None:
+            ai_stop_atr_mult = self._clamp(float(ai_stop_atr_mult), 0.5, 5.0)
+
+        # --- Sizing -------------------------------------------------------
+        margin = equity * balance_pct
         notional = margin * self.cfg.leverage
         size = self.kraken.amount_for_notional(notional, entry)
+
         # SL/TP are set relative to the real (slipped) entry, like live.
         # Stop width is fixed or ATR-scaled; TP is rr x the stop distance.
-        stop_pct = self._effective_stop_pct(entry)
-        rr = self.cfg.take_profit_rr
-        sl, tp, _close_side = _bracket_prices(side, entry, stop_pct, rr)
+        stop_pct = self._effective_stop_pct(
+            entry,
+            stop_mode=ai_stop_mode,
+            stop_loss_pct=ai_stop_loss_pct,
+            stop_atr_mult=ai_stop_atr_mult,
+        )
+        effective_stop_mode = (ai_stop_mode or self.cfg.stop_mode).lower()
+        sl, tp_price, _close_side = _bracket_prices(side, entry, stop_pct, rr)
         self.state["open"] = {
             "side": side,
             "rating": rating,
             "entry": entry,
             "size": size,
             "sl": sl,
-            "tp": tp,
+            "tp": tp_price,
             "stop_pct": stop_pct,
             "rr": rr,
             "notional": notional,
             "opened_at": _now_iso(),
+            "trader_params": tp,
         }
         logger.info(
             "OPEN %s %s @ %.4f (ref %.4f, slip %.3f%%) size %.4f | SL %.4f TP %.4f "
-            "(stop %.2f%% x rr %.1f, mode %s) | equity %.2f",
-            side, self.cfg.symbol, entry, ref_price, self.slippage, size, sl, tp,
-            stop_pct, rr, self.cfg.stop_mode, equity,
+            "(stop %.2f%% x rr %.1f, mode %s) | equity %.2f | ai_params %s",
+            side, self.cfg.symbol, entry, ref_price, self.slippage, size, sl, tp_price,
+            stop_pct, rr, effective_stop_mode, equity, tp or "none",
         )
         self._emit_event(
             "open", symbol=self.cfg.symbol, side=side, rating=rating, entry=entry,
-            ref_price=ref_price, slip_pct=self.slippage, size=size, sl=sl, tp=tp,
-            stop_pct=stop_pct, rr=rr, stop_mode=self.cfg.stop_mode, notional=notional,
-            equity=equity,
+            ref_price=ref_price, slip_pct=self.slippage, size=size, sl=sl, tp=tp_price,
+            stop_pct=stop_pct, rr=rr, stop_mode=effective_stop_mode, notional=notional,
+            equity=equity, balance_pct=balance_pct, trader_params=tp,
         )
 
     # ------------------------------------------------------------- monitor

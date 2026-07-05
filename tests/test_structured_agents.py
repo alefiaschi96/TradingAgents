@@ -21,6 +21,7 @@ from tradingagents.agents.schemas import (
     SentimentReport,
     TraderAction,
     TraderProposal,
+    extract_trader_params,
     render_research_plan,
     render_sentiment_report,
     render_trader_proposal,
@@ -64,7 +65,67 @@ class TestRenderTraderProposal:
         assert "Entry Price" not in md
         assert "Stop Loss" not in md
         assert "Position Sizing" not in md
+        assert "Stop Loss %" not in md
+        assert "Take Profit RR" not in md
+        assert "Balance %" not in md
+        assert "Stop Mode" not in md
+        assert "Stop ATR Mult" not in md
         assert "FINAL TRANSACTION PROPOSAL: **SELL**" in md
+
+    def test_risk_params_included_when_present(self):
+        p = TraderProposal(
+            action=TraderAction.BUY,
+            reasoning="Strong trend-aligned setup.",
+            stop_loss_pct=0.8,
+            take_profit_rr=2.5,
+            balance_pct=0.6,
+            stop_mode="atr",
+            stop_atr_mult=1.5,
+        )
+        md = render_trader_proposal(p)
+        assert "**Stop Loss %**: 0.8" in md
+        assert "**Take Profit RR**: 2.5" in md
+        assert "**Balance %**: 0.6" in md
+        assert "**Stop Mode**: atr" in md
+        assert "**Stop ATR Mult**: 1.5" in md
+
+
+@pytest.mark.unit
+class TestExtractTraderParams:
+    def test_extracts_all_params(self):
+        p = TraderProposal(
+            action=TraderAction.BUY,
+            reasoning="Go.",
+            stop_loss_pct=0.5,
+            take_profit_rr=2.0,
+            balance_pct=0.8,
+            stop_mode="atr",
+            stop_atr_mult=1.5,
+        )
+        params = extract_trader_params(p)
+        assert params == {
+            "stop_loss_pct": 0.5,
+            "take_profit_rr": 2.0,
+            "balance_pct": 0.8,
+            "stop_mode": "atr",
+            "stop_atr_mult": 1.5,
+        }
+
+    def test_empty_when_no_risk_params(self):
+        p = TraderProposal(action=TraderAction.HOLD, reasoning="Flat.")
+        assert extract_trader_params(p) == {}
+
+    def test_partial_params(self):
+        p = TraderProposal(
+            action=TraderAction.SELL,
+            reasoning="Weak.",
+            stop_loss_pct=1.0,
+            take_profit_rr=3.0,
+        )
+        params = extract_trader_params(p)
+        assert params == {"stop_loss_pct": 1.0, "take_profit_rr": 3.0}
+        assert "balance_pct" not in params
+        assert "stop_mode" not in params
 
 
 @pytest.mark.unit
@@ -131,6 +192,9 @@ class TestTraderAgent:
             entry_price=189.5,
             stop_loss=178.0,
             position_sizing="6% of portfolio",
+            stop_loss_pct=0.8,
+            take_profit_rr=2.5,
+            balance_pct=0.6,
         )
         llm = _structured_trader_llm(captured, proposal)
         trader = create_trader(llm)
@@ -141,6 +205,11 @@ class TestTraderAgent:
         assert "FINAL TRANSACTION PROPOSAL: **BUY**" in plan
         # The same rendered markdown is also added to messages for downstream agents.
         assert plan in result["messages"][0].content
+        # Verify risk params are extracted into trader_params.
+        params = result["trader_params"]
+        assert params["stop_loss_pct"] == 0.8
+        assert params["take_profit_rr"] == 2.5
+        assert params["balance_pct"] == 0.6
 
     def test_prompt_includes_investment_plan(self):
         captured = {}
@@ -162,6 +231,8 @@ class TestTraderAgent:
         trader = create_trader(llm)
         result = trader(_make_trader_state())
         assert result["trader_investment_plan"] == plain_response
+        # Free-text fallback produces no structured risk params.
+        assert result["trader_params"] == {}
 
 
 # ---------------------------------------------------------------------------

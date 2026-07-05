@@ -112,6 +112,12 @@ class TraderProposal(BaseModel):
     reports, then turns them into a concrete transaction: what action to
     take, the reasoning that justifies it, and the practical levels for
     entry, stop-loss, and sizing.
+
+    The risk-parameter fields (``stop_loss_pct``, ``take_profit_rr``,
+    ``balance_pct``, ``stop_mode``, ``stop_atr_mult``) are machine-readable
+    values consumed directly by the paper-sim / live runner to bracket and
+    size the position.  All are optional — when absent the simulator falls
+    back to the env-config defaults.
     """
 
     action: TraderAction = Field(
@@ -136,6 +142,43 @@ class TraderProposal(BaseModel):
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
 
+    # -- Risk parameters consumed by the simulator / live runner -----------
+    stop_loss_pct: float | None = Field(
+        default=None,
+        description=(
+            "Stop-loss distance as a percentage of entry price "
+            "(e.g. 0.5 means ±0.5%). Typical range: 0.2–2.0."
+        ),
+    )
+    take_profit_rr: float | None = Field(
+        default=None,
+        description=(
+            "Reward-to-risk ratio: take-profit distance = this × stop distance. "
+            "Typical range: 1.0–4.0."
+        ),
+    )
+    balance_pct: float | None = Field(
+        default=None,
+        description=(
+            "Fraction of equity to commit as margin, between 0.0 and 1.0. "
+            "E.g. 0.5 means use 50% of available equity."
+        ),
+    )
+    stop_mode: str | None = Field(
+        default=None,
+        description=(
+            "Stop calculation mode: 'fixed' (use stop_loss_pct directly) or "
+            "'atr' (scale stop to recent volatility via stop_atr_mult)."
+        ),
+    )
+    stop_atr_mult: float | None = Field(
+        default=None,
+        description=(
+            "When stop_mode is 'atr', stop distance = this × ATR. "
+            "Typical range: 1.0–3.0."
+        ),
+    )
+
 
 def render_trader_proposal(proposal: TraderProposal) -> str:
     """Render a TraderProposal to markdown.
@@ -155,11 +198,43 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
     if proposal.position_sizing:
         parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
+    # Risk parameters decided by the AI
+    if proposal.stop_loss_pct is not None:
+        parts.extend(["", f"**Stop Loss %**: {proposal.stop_loss_pct}"])
+    if proposal.take_profit_rr is not None:
+        parts.extend(["", f"**Take Profit RR**: {proposal.take_profit_rr}"])
+    if proposal.balance_pct is not None:
+        parts.extend(["", f"**Balance %**: {proposal.balance_pct}"])
+    if proposal.stop_mode is not None:
+        parts.extend(["", f"**Stop Mode**: {proposal.stop_mode}"])
+    if proposal.stop_atr_mult is not None:
+        parts.extend(["", f"**Stop ATR Mult**: {proposal.stop_atr_mult}"])
     parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
     ])
     return "\n".join(parts)
+
+
+def extract_trader_params(proposal: TraderProposal) -> dict:
+    """Extract the machine-readable risk parameters from a TraderProposal.
+
+    Returns a dict with only the non-None risk fields. An empty dict means
+    "use all config defaults". Consumed by the paper-sim / live runner to
+    override the env-config stop / TP / sizing values with AI-decided ones.
+    """
+    params: dict = {}
+    if proposal.stop_loss_pct is not None:
+        params["stop_loss_pct"] = proposal.stop_loss_pct
+    if proposal.take_profit_rr is not None:
+        params["take_profit_rr"] = proposal.take_profit_rr
+    if proposal.balance_pct is not None:
+        params["balance_pct"] = proposal.balance_pct
+    if proposal.stop_mode is not None:
+        params["stop_mode"] = proposal.stop_mode
+    if proposal.stop_atr_mult is not None:
+        params["stop_atr_mult"] = proposal.stop_atr_mult
+    return params
 
 
 # ---------------------------------------------------------------------------

@@ -67,6 +67,11 @@ _ALIASES = {
     "GER40": "^GDAXI", "GER30": "^GDAXI", "DE40": "^GDAXI",
     "UK100": "^FTSE", "JP225": "^N225", "JPN225": "^N225",
     "FRA40": "^FCHI", "EU50": "^STOXX50E", "HK50": "^HSI",
+    # Crypto ticker collisions: Yahoo's plain HYPE-USD is "Supreme Finance",
+    # a dead micro-cap; Hyperliquid lives under the CoinMarketCap-suffixed id.
+    # Alias only the Yahoo side — exchanges (ccxt) keep the plain HYPE base.
+    "HYPE": "HYPE32196-USD", "HYPEUSD": "HYPE32196-USD",
+    "HYPE-USD": "HYPE32196-USD",
 }
 
 # Yahoo symbols may contain letters, digits, and these structural characters.

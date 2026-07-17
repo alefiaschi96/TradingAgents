@@ -65,6 +65,20 @@ def _is_forward_looking(market: dict, now: datetime) -> bool:
     )
 
 
+def get_prediction_markets_disabled(topic: str, limit: int | None = None) -> str:
+    """No-op vendor used when ``prediction_markets`` is set to ``none``.
+
+    Some jurisdictions block Polymarket at the network level (e.g. Italy
+    redirects ``gamma-api.polymarket.com`` to a government block page, which
+    surfaces as an SSL hostname-mismatch on every call). Selecting the ``none``
+    vendor turns the source off cleanly instead of failing on each request.
+    """
+    return (
+        "Prediction-market data is disabled in this configuration; "
+        f"proceed without prediction-market signal for '{topic}'."
+    )
+
+
 def get_prediction_markets(topic: str, limit: int | None = None) -> str:
     """Return live prediction-market probabilities for an event topic.
 

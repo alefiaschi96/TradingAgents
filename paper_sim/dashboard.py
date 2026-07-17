@@ -246,11 +246,13 @@ def _asset_name() -> str:
     Hardcoding "SOL" was wrong once we run multiple instruments; the launcher
     exports SYMBOL per instance, so read it from there."""
     import re
+    from live.config import _KRAKEN_BASE_ALIASES
+
     sym = (os.environ.get("ANALYSIS_SYMBOL") or os.environ.get("SYMBOL") or "").upper()
     s = re.sub(r"^PF_", "", sym)
     s = re.split(r"[-/]", s)[0]
     s = re.sub(r"USD$", "", s)
-    return s or "il prezzo"
+    return _KRAKEN_BASE_ALIASES.get(s, s) or "il prezzo"
 
 
 def _fmt_price(x: float) -> str:

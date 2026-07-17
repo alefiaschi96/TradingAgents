@@ -41,7 +41,9 @@ def _b(name: str, default: bool) -> bool:
 
 # Kraken quotes Bitcoin as XBT; map it back to the BTC base that yfinance /
 # TradingAgents expect. Other bases are identical on both sides.
-_KRAKEN_BASE_ALIASES = {"XBT": "BTC"}
+# HYPE: Yahoo's plain HYPE-USD is "Supreme Finance", a dead micro-cap; the
+# Hyperliquid token lives under the CoinMarketCap-suffixed id.
+_KRAKEN_BASE_ALIASES = {"XBT": "BTC", "HYPE": "HYPE32196"}
 
 
 def _derive_analysis_symbol(kraken_symbol: str) -> str:

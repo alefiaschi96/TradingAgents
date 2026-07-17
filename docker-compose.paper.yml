@@ -112,5 +112,24 @@ services:
     depends_on:
       - hype
 
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    env_file: .env.live
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - sol-dashboard
+      - ada-dashboard
+      - btc-dashboard
+      - hype-dashboard
+
 volumes:
   paper_data:
+  caddy_data:
+  caddy_config:

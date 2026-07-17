@@ -1,0 +1,30 @@
+# Reverse proxy con HTTPS (Let's Encrypt) e basic auth davanti alle dashboard.
+# L'hash bcrypt della password NON sta nel repo: va in .env.live sul server
+# come DASH_HASH (generalo con: docker run --rm caddy:2 caddy hash-password).
+# I domini *.sslip.io risolvono automaticamente all'IP contenuto nel nome.
+
+(auth) {
+	basic_auth {
+		trader {$DASH_HASH}
+	}
+}
+
+sol.167.233.228.170.sslip.io {
+	import auth
+	reverse_proxy sol-dashboard:8765
+}
+
+ada.167.233.228.170.sslip.io {
+	import auth
+	reverse_proxy ada-dashboard:8765
+}
+
+btc.167.233.228.170.sslip.io {
+	import auth
+	reverse_proxy btc-dashboard:8765
+}
+
+hype.167.233.228.170.sslip.io {
+	import auth
+	reverse_proxy hype-dashboard:8765
+}

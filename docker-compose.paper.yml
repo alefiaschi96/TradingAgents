@@ -1,0 +1,70 @@
+# Paper-sim su server: un daemon + una dashboard per simbolo, stato e log nel
+# volume `paper_data` (il repo sul server resta pulito). Avvio:
+#
+#     docker compose -f docker-compose.paper.yml up -d --build
+#
+# Le dashboard sono pubblicate SOLO su 127.0.0.1 del server: dal Mac
+#     ssh -N -L 8765:localhost:8765 -L 8766:localhost:8766 <vps>
+# oppure Tailscale (vedi deploy/vps.md). Per aggiungere un simbolo, copia la
+# coppia di servizi cambiando SYMBOL, percorsi /data/<SLUG> e porta host.
+
+x-daemon: &daemon
+  build:
+    context: .
+    dockerfile: Dockerfile.live
+  image: tradingagents-paper
+  env_file: .env.live
+  restart: unless-stopped
+  command: ["python", "-m", "paper_sim.run"]
+  volumes:
+    - paper_data:/data
+
+x-dashboard: &dashboard
+  image: tradingagents-paper
+  env_file: .env.live
+  restart: unless-stopped
+  command: ["python", "-m", "paper_sim.dashboard"]
+  environment:
+    DASHBOARD_HOST: 0.0.0.0
+  volumes:
+    - paper_data:/data
+
+services:
+  sol:
+    <<: *daemon
+    environment:
+      SYMBOL: PF_SOLUSD
+      PAPER_STATE_PATH: /data/SOL/state.json
+      PAPER_LOG_DIR: /data/SOL/logs
+
+  sol-dashboard:
+    <<: *dashboard
+    environment:
+      DASHBOARD_HOST: 0.0.0.0
+      PAPER_STATE_PATH: /data/SOL/state.json
+      PAPER_LOG_DIR: /data/SOL/logs
+    ports:
+      - "127.0.0.1:8765:8765"
+    depends_on:
+      - sol
+
+  ada:
+    <<: *daemon
+    environment:
+      SYMBOL: PF_ADAUSD
+      PAPER_STATE_PATH: /data/ADA/state.json
+      PAPER_LOG_DIR: /data/ADA/logs
+
+  ada-dashboard:
+    <<: *dashboard
+    environment:
+      DASHBOARD_HOST: 0.0.0.0
+      PAPER_STATE_PATH: /data/ADA/state.json
+      PAPER_LOG_DIR: /data/ADA/logs
+    ports:
+      - "127.0.0.1:8766:8765"
+    depends_on:
+      - ada
+
+volumes:
+  paper_data:

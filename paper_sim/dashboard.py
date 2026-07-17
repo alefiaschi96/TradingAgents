@@ -667,7 +667,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    srv = ThreadingHTTPServer(("127.0.0.1", _PORT), _Handler)
+    # DASHBOARD_HOST=0.0.0.0 only inside Docker, where the port mapping (not
+    # the bind) decides exposure; on a bare host keep the localhost default.
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+    srv = ThreadingHTTPServer((host, _PORT), _Handler)
     url = f"http://localhost:{_PORT}"
     print(f"Dashboard live su  ->  {url}   (Ctrl-C per fermare)")
     if os.environ.get("DASHBOARD_OPEN", "1") != "0":

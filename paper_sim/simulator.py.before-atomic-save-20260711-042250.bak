@@ -10,12 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
-import shutil
-import tempfile
 import time
 from datetime import datetime, timezone
-from json import JSONDecodeError
 
 from live.analysis import reasoning_from_state, run_analysis
 from live.bridge import _bracket_prices
@@ -28,45 +24,6 @@ logger = logging.getLogger("paper_sim")
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-_PRICE_TARGET_RE = re.compile(
-    r"price\s*target\**\s*[:\-]\s*\**\s*[~≈]?\s*\$?\s*([0-9][\d,]*(?:\.\d+)?)",
-    re.I,
-)
-
-
-def parse_price_target(pm_decision: str) -> float | None:
-    """The PM report's explicit "**Price Target**: <n>" level, or None.
-
-    Takes the last match so the structured field at the end of the report wins
-    over incidental "price target" mentions inside the thesis text.
-    """
-    matches = _PRICE_TARGET_RE.findall(pm_decision or "")
-    if not matches:
-        return None
-    try:
-        value = float(matches[-1].replace(",", ""))
-    except ValueError:
-        return None
-    return value if value > 0 else None
-
-
-def capped_tp(
-    side: str, entry: float, tp_rr: float, analyst_target: float | None
-) -> tuple[float, str]:
-    """Effective take-profit: the PM's stated price target when it sits
-    strictly between entry and the rr-based TP (profitable side, nearer than
-    the mechanical level), else the rr TP unchanged. The rr level is a hard
-    ceiling — the target can only pull the TP closer, never push it further.
-    Returns (tp, source) with source "analyst_target" or "rr".
-    """
-    if analyst_target is not None and (
-        (side == "buy" and entry < analyst_target < tp_rr)
-        or (side == "sell" and tp_rr < analyst_target < entry)
-    ):
-        return analyst_target, "analyst_target"
-    return tp_rr, "rr"
 
 
 def check_hit(side: str, sl: float, tp: float, high: float, low: float):
@@ -97,7 +54,6 @@ class PaperSimulator:
         fee_pct_per_side: float,
         decision_interval_min: float,
         slippage_pct_per_side: float = 0.0,
-        analysis_min_gap_min: float = 30.0,
         event_sink=None,
     ):
         self.cfg = cfg
@@ -105,16 +61,9 @@ class PaperSimulator:
         self.fee = fee_pct_per_side
         self.slippage = slippage_pct_per_side
         self.decision_interval = decision_interval_min * 60.0
-        # Floor between two analyses when a regime *transition* fires early
-        # (the periodic re-check still waits the full decision_interval).
-        self.analysis_min_gap = analysis_min_gap_min * 60.0
         self.kraken = KrakenClient(cfg, "", "")  # no keys: public price/markets only
         self.state = self._load(start_equity)
         self._last_regime_log = None  # throttles the "regime ready/not ready" log line
-        # Last regime observed while flat ("up"/"down"/"chop"/...). A tick whose
-        # directional read differs from this baseline is a fresh transition —
-        # the birth of a trend — and may trigger an early analysis.
-        self._prev_regime: str | None = None
         # Structured per-run event stream (JSONL). No-op when unset so the
         # simulator stays usable/testable without a run logger.
         self._emit_event = event_sink if event_sink is not None else (lambda *a, **k: None)
@@ -125,8 +74,10 @@ class PaperSimulator:
         self.kraken.connect()
 
     # ------------------------------------------------------------- state
-    @staticmethod
-    def _new_state(start_equity: float) -> dict:
+    def _load(self, start_equity: float) -> dict:
+        if os.path.exists(self.state_path):
+            with open(self.state_path) as f:
+                return json.load(f)
         return {
             "equity": start_equity,
             "open": None,
@@ -137,94 +88,10 @@ class PaperSimulator:
             "pnl_total": 0.0,
         }
 
-    @staticmethod
-    def _read_state_file(path: str, start_equity: float) -> dict:
-        with open(path, encoding="utf-8") as f:
-            state = json.load(f)
-
-        if not isinstance(state, dict):
-            raise ValueError("state root must be a JSON object")
-
-        defaults = PaperSimulator._new_state(start_equity)
-        defaults.update(state)
-        state = defaults
-
-        if not isinstance(state["closed"], list):
-            raise ValueError("state['closed'] must be a list")
-        if state["open"] is not None and not isinstance(state["open"], dict):
-            raise ValueError("state['open'] must be an object or null")
-
-        state["equity"] = float(state["equity"])
-        state["wins"] = int(state["wins"])
-        state["losses"] = int(state["losses"])
-        state["pnl_total"] = float(state["pnl_total"])
-        return state
-
-    def _load(self, start_equity: float) -> dict:
-        if not os.path.exists(self.state_path):
-            return self._new_state(start_equity)
-
-        backup_path = f"{self.state_path}.bak"
-        try:
-            return self._read_state_file(self.state_path, start_equity)
-        except (JSONDecodeError, OSError, TypeError, ValueError, KeyError) as exc:
-            logger.error("Invalid paper-sim state %s: %s", self.state_path, exc)
-
-        if os.path.exists(backup_path):
-            try:
-                recovered = self._read_state_file(backup_path, start_equity)
-                shutil.copy2(backup_path, self.state_path)
-                logger.warning(
-                    "Recovered paper-sim state from backup %s", backup_path
-                )
-                return recovered
-            except (JSONDecodeError, OSError, TypeError, ValueError, KeyError) as exc:
-                logger.error("Invalid paper-sim backup %s: %s", backup_path, exc)
-
-        raise RuntimeError(
-            f"Paper-sim state is invalid and no valid backup exists: "
-            f"{self.state_path}. Restore a known-good state file before restarting."
-        )
-
     def save(self) -> None:
-        state_dir = os.path.dirname(os.path.abspath(self.state_path))
-        os.makedirs(state_dir, exist_ok=True)
-        backup_path = f"{self.state_path}.bak"
-        tmp_path = None
-
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=state_dir,
-                prefix=".paper-sim-state-",
-                suffix=".tmp",
-                delete=False,
-            ) as tmp:
-                tmp_path = tmp.name
-                json.dump(self.state, tmp, indent=2, default=str)
-                tmp.write("\n")
-                tmp.flush()
-                os.fsync(tmp.fileno())
-
-            if os.path.exists(self.state_path):
-                try:
-                    self._read_state_file(
-                        self.state_path, float(self.state["equity"])
-                    )
-                except (JSONDecodeError, OSError, TypeError, ValueError, KeyError):
-                    logger.warning(
-                        "Existing state is invalid; not overwriting backup %s",
-                        backup_path,
-                    )
-                else:
-                    shutil.copy2(self.state_path, backup_path)
-
-            os.replace(tmp_path, self.state_path)
-            tmp_path = None
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                os.remove(tmp_path)
+        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+        with open(self.state_path, "w") as f:
+            json.dump(self.state, f, indent=2, default=str)
 
     def has_open(self) -> bool:
         return self.state.get("open") is not None
@@ -310,7 +177,7 @@ class PaperSimulator:
     def _regime_signals(self) -> dict | None:
         """Higher-timeframe trend read: EMA (now + a few bars back for slope),
         the latest price, and ATR — all from one regime-timeframe fetch.
-        Returns None if data is unavailable (the pre-screen then fails open)."""
+        Returns None if data is unavailable (the gate then fails open)."""
         period = self.cfg.regime_ema_period
         need = period + 5  # extra bars for the slope lookback and ATR
         try:
@@ -328,6 +195,31 @@ class PaperSimulator:
             "ema_prev": ema[-4] if len(ema) >= 4 else ema[0],
             "atr": self._atr_from_ohlcv(ohlcv, min(period, len(ohlcv) - 1)),
         }
+
+    def _regime_gate(self, side: str) -> tuple[bool, str]:
+        """Pre-trade veto: block trades that fight the higher-timeframe trend,
+        that fire in a flat/choppy regime, or that chase an over-extended move.
+        Can only VETO an LLM decision, never create one. Fails open."""
+        if not self.cfg.regime_filter:
+            return True, "filter off"
+        sig = self._regime_signals()
+        if sig is None:
+            return True, "no regime data (allow)"
+        price, ema, ema_prev, atr = sig["price"], sig["ema"], sig["ema_prev"], sig["atr"]
+        slope = ema - ema_prev
+        trend_up = price > ema and slope > 0
+        trend_down = price < ema and slope < 0
+        if not trend_up and not trend_down:
+            return False, "chop (no clear HTF trend)"
+        if side == "buy" and not trend_up:
+            return False, "long against HTF trend"
+        if side == "sell" and not trend_down:
+            return False, "short against HTF trend"
+        if atr and atr > 0:
+            stretch = abs(price - ema) / atr
+            if stretch > self.cfg.regime_max_stretch_atr:
+                return False, f"overextended ({stretch:.1f} ATR from EMA — chasing)"
+        return True, "trend-aligned, not overextended"
 
     def _regime_ready(self) -> tuple[bool, str, str]:
         """Cheap, direction-agnostic pre-screen: is there a clean tradeable
@@ -352,43 +244,15 @@ class PaperSimulator:
                 return False, "stretched", f"overextended ({stretch:.1f} ATR from EMA)"
         return True, regime, f"{regime}-trend setup"
 
-    def _analysis_gap_elapsed(self, now_ts: float) -> bool:
-        """Rate-limit for transition-triggered analyses (anti flip-flop spam)."""
-        last = self.state.get("last_decision_at")
-        return last is None or (now_ts - last) >= self.analysis_min_gap
-
     def should_decide(self, now_ts: float) -> bool:
-        """Trigger the (expensive) LLM only on a clean regime setup, either when
-        the periodic cooldown has elapsed (re-check of a standing trend) or the
-        moment the regime *transitions* into a directional state (chop→trend or
-        trend flip). The transition path bypasses the cooldown so the analysis
-        lands on the birth of the move instead of hours into it; it is
-        rate-limited by analysis_min_gap so regime flip-flop can't spam LLM runs.
-        """
-        ready, regime, reason = self._regime_ready()
-        prev = self._prev_regime
-        if not ready:
-            # chop/stretched/nodata: reset the baseline so the next clean
-            # directional read counts as a fresh transition.
-            self._log_regime(regime, reason, False)
-            self._prev_regime = regime
+        """Trigger the (expensive) LLM only when the cooldown has elapsed AND a
+        clean regime setup exists now. Replaces the fixed-interval trigger: we
+        scan cheaply every tick and spend tokens only on real setups."""
+        if not self.decision_due(now_ts):  # cooldown since last analysis / exit
             return False
-        if self.decision_due(now_ts):  # cooldown elapsed: periodic re-check
-            self._log_regime(regime, reason, True)
-            self._prev_regime = regime
-            return True
-        directional = regime in ("up", "down")
-        if directional and regime != prev and self._analysis_gap_elapsed(now_ts):
-            logger.info(
-                "regime transition (%s -> %s) — early analysis, cooldown bypassed: %s",
-                prev or "start", regime, reason,
-            )
-            self._prev_regime = regime
-            return True
-        # Ready but waiting (cooldown running, no fresh transition — or the
-        # transition is inside the min gap: baseline stays put so it still
-        # fires once the gap elapses).
-        return False
+        ready, regime, reason = self._regime_ready()
+        self._log_regime(regime, reason, ready)
+        return ready
 
     def _log_regime(self, regime: str, reason: str, ready: bool) -> None:
         """Log the regime read only when it changes, to avoid 60s spam."""
@@ -423,11 +287,18 @@ class PaperSimulator:
             logger.info("decision %s -> no entry (stay flat)", rating)
             self._emit_event("decision", rating=rating, side=None, action="flat")
             return
-        self._emit_event("decision", rating=rating, side=side, action="open")
-        analyst_target = parse_price_target(
-            (state or {}).get("final_trade_decision", "")
+        allowed, reason = self._regime_gate(side)
+        if not allowed:
+            logger.info("decision %s (%s) -> VETOED by regime gate: %s", rating, side, reason)
+            self._emit_event(
+                "decision", rating=rating, side=side, action="vetoed", veto_reason=reason
+            )
+            return
+        logger.info("regime gate OK: %s (%s) -> %s", rating, side, reason)
+        self._emit_event(
+            "decision", rating=rating, side=side, action="open", regime_reason=reason
         )
-        self.open_position(side, rating, analyst_target=analyst_target)
+        self.open_position(side, rating)
 
     def _fill_price(self, price: float, fill_side: str) -> float:
         """Adverse-slippage fill for a market order: a buy fills higher, a sell
@@ -436,9 +307,7 @@ class PaperSimulator:
         slip = self.slippage / 100.0
         return price * (1.0 + slip) if fill_side == "buy" else price * (1.0 - slip)
 
-    def open_position(
-        self, side: str, rating: str, analyst_target: float | None = None
-    ) -> None:
+    def open_position(self, side: str, rating: str) -> None:
         ref_price = self.last_price()
         entry = self._fill_price(ref_price, side)  # market entry slips against us
         equity = self.state["equity"]
@@ -446,17 +315,10 @@ class PaperSimulator:
         notional = margin * self.cfg.leverage
         size = self.kraken.amount_for_notional(notional, entry)
         # SL/TP are set relative to the real (slipped) entry, like live.
-        # Stop width is fixed or ATR-scaled; TP is rr x the stop distance,
-        # capped at the PM's stated price target when that is nearer.
+        # Stop width is fixed or ATR-scaled; TP is rr x the stop distance.
         stop_pct = self._effective_stop_pct(entry)
         rr = self.cfg.take_profit_rr
-        sl, tp_rr, _close_side = _bracket_prices(side, entry, stop_pct, rr)
-        tp, tp_source = capped_tp(side, entry, tp_rr, analyst_target)
-        if tp_source == "analyst_target":
-            logger.info(
-                "TP capped to analyst price target %.4f (rr bracket wanted %.4f)",
-                tp, tp_rr,
-            )
+        sl, tp, _close_side = _bracket_prices(side, entry, stop_pct, rr)
         self.state["open"] = {
             "side": side,
             "rating": rating,
@@ -464,7 +326,6 @@ class PaperSimulator:
             "size": size,
             "sl": sl,
             "tp": tp,
-            "tp_source": tp_source,
             "stop_pct": stop_pct,
             "rr": rr,
             "notional": notional,
@@ -472,15 +333,15 @@ class PaperSimulator:
         }
         logger.info(
             "OPEN %s %s @ %.4f (ref %.4f, slip %.3f%%) size %.4f | SL %.4f TP %.4f "
-            "(stop %.2f%% x rr %.1f, mode %s, tp %s) | equity %.2f",
+            "(stop %.2f%% x rr %.1f, mode %s) | equity %.2f",
             side, self.cfg.symbol, entry, ref_price, self.slippage, size, sl, tp,
-            stop_pct, rr, self.cfg.stop_mode, tp_source, equity,
+            stop_pct, rr, self.cfg.stop_mode, equity,
         )
         self._emit_event(
             "open", symbol=self.cfg.symbol, side=side, rating=rating, entry=entry,
             ref_price=ref_price, slip_pct=self.slippage, size=size, sl=sl, tp=tp,
-            tp_source=tp_source, stop_pct=stop_pct, rr=rr, stop_mode=self.cfg.stop_mode,
-            notional=notional, equity=equity,
+            stop_pct=stop_pct, rr=rr, stop_mode=self.cfg.stop_mode, notional=notional,
+            equity=equity,
         )
 
     # ------------------------------------------------------------- monitor

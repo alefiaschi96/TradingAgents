@@ -90,6 +90,23 @@ def build_config(cfg) -> dict:
     if cfg.google_thinking_level:
         config["google_thinking_level"] = cfg.google_thinking_level
 
+    # Early market gate: when the analyst gate is on, a market report that backs
+    # no trade (HOLD/flat or no usable data) ends the graph right after the
+    # market analyst — the end-of-run gate would veto those cases anyway, so the
+    # remaining LLM stages (other analysts, debate, trader, risk, PM) are pure
+    # cost. The run then returns a plain "Hold".
+    config["market_gate_short_circuit"] = bool(cfg.analyst_gate)
+
+    # Prediction markets: set the vendor to "none" when disabled so the news
+    # analyst neither queries Polymarket nor logs its failures (it is blocked at
+    # the network level in some jurisdictions). Build a fresh data_vendors dict —
+    # DEFAULT_CONFIG.copy() is shallow, so never mutate the shared one in place.
+    if not cfg.prediction_markets:
+        config["data_vendors"] = {
+            **config.get("data_vendors", {}),
+            "prediction_markets": "none",
+        }
+
     # Intraday mode (Path 1): route market price + indicators + verified
     # snapshot to the Kraken intraday vendor so the whole analysis sees the
     # same intraday bars instead of daily candles.

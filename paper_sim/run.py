@@ -36,14 +36,17 @@ def main() -> int:
         fee_pct_per_side=float(os.environ.get("FEE_PCT_PER_SIDE", "0.05")),
         slippage_pct_per_side=float(os.environ.get("SLIPPAGE_PCT_PER_SIDE", "0.02")),
         decision_interval_min=float(os.environ.get("DECISION_INTERVAL_MIN", "40")),
+        analysis_min_gap_min=float(os.environ.get("ANALYSIS_MIN_GAP_MIN", "30")),
         event_sink=run_log.event,
     )
     monitor_interval = float(os.environ.get("MONITOR_INTERVAL_SEC", "60"))
 
     sim.connect()
     log.info(
-        "paper-sim started | %s | LLM cooldown >=%.0fmin + regime trigger, monitor every %.0fs | %s",
-        cfg.symbol, sim.decision_interval / 60, monitor_interval, sim.summary(),
+        "paper-sim started | %s | LLM re-check >=%.0fmin, early trigger on regime flip "
+        "(>=%.0fmin gap), monitor every %.0fs | %s",
+        cfg.symbol, sim.decision_interval / 60, sim.analysis_min_gap / 60,
+        monitor_interval, sim.summary(),
     )
 
     while True:

@@ -85,6 +85,8 @@ class Config:
     regime_timeframe: str      # higher timeframe read for the trend, e.g. "1h"
     regime_ema_period: int     # EMA period (in regime bars) that defines the trend
     regime_max_stretch_atr: float  # veto if price is this many ATRs from the regime EMA (anti-chase)
+    analyst_gate: bool     # veto entries the market analyst's report doesn't back (HOLD/no-data/opposite)
+    prediction_markets: bool  # let the news analyst query Polymarket (off where it's network-blocked)
     balance_pct: float     # fraction of balance committed as margin (0-1)
     margin_currency: str    # collateral currency to read from the wallet
     equity_floor_usd: float  # kill-switch: no new trades below this equity
@@ -149,6 +151,8 @@ class Config:
             regime_timeframe=_s("REGIME_TIMEFRAME", "1h"),
             regime_ema_period=_i("REGIME_EMA_PERIOD", 20),
             regime_max_stretch_atr=_f("REGIME_MAX_STRETCH_ATR", 3.0),
+            analyst_gate=_b("ANALYST_GATE", True),
+            prediction_markets=_b("PREDICTION_MARKETS", True),
             balance_pct=_f("BALANCE_PCT", 0.98),
             margin_currency=_s("MARGIN_CURRENCY", "USD"),
             equity_floor_usd=_f("EQUITY_FLOOR_USD", 0.0),
@@ -193,4 +197,6 @@ class Config:
             "stop_mode": self.stop_mode,
             "take_profit_rr": self.take_profit_rr,
             "regime_filter": self.regime_filter,
+            "analyst_gate": self.analyst_gate,
+            "prediction_markets": self.prediction_markets,
         }

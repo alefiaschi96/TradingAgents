@@ -31,12 +31,26 @@ def _resolve_log() -> str:
     daemon creates it (otherwise it sticks to the fallback path forever)."""
     return os.environ.get("PAPER_LOG") or default_text_log("paper_sim")
 _STALE_MIN = float(os.environ.get("WATCH_STALE_MIN", "12"))
-_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("DASHBOARD_PORT", "8765"))
+
+
+def _port_from_argv() -> int:
+    """Optional first CLI arg is the port; ignore non-numeric argv (e.g. when
+    the module is imported under pytest) so import never crashes."""
+    if len(sys.argv) > 1:
+        try:
+            return int(sys.argv[1])
+        except ValueError:
+            pass
+    return int(os.environ.get("DASHBOARD_PORT", "8765"))
+
+
+_PORT = _port_from_argv()
 
 _KEY = (
     "paper-sim started", "regime ready", "regime not ready", "setup detected",
     "Analysis decision for", "VETOED", "regime gate OK", "no entry",
-    "OPEN PF", "CLOSE ", "exceeded", "loop error",
+    "OPEN PF", "CLOSE ", "exceeded", "loop error", "market gate short-circuit",
+    "regime transition",
 )
 
 
@@ -77,6 +91,33 @@ def _state_ts(iso: str) -> str:
         return str(iso)[11:19]
 
 
+def _veto_message(low: str) -> str:
+    """Spell out *why* a trade was vetoed, one clear Italian line per case.
+
+    The two gates log ``... VETOED by <analyst|regime> gate: <reason>``. We key
+    off the gate and the reason so every veto is explicit in the feed instead of
+    a single catch-all. Analyst gate: no data / HOLD / opposite view. Regime
+    gate: chop / against the higher-timeframe trend / overextended. Unknown or
+    older unlabelled vetoes fall back to a generic line."""
+    reason = low.split("gate:", 1)[1].strip() if "gate:" in low else low
+    if "analyst gate" in low:
+        if "no reliable" in reason:
+            return "Operazione annullata: l'analista di mercato non aveva dati affidabili"
+        if "hold/flat" in reason or "no directional" in reason:
+            return "Operazione annullata: l'analista di mercato consigliava di ASPETTARE"
+        if "against market analyst" in reason:
+            return "Operazione annullata: andava CONTRO il parere dell'analista di mercato"
+        return "Operazione annullata dall'analista di mercato"
+    # regime gate (or older/unlabelled vetoes)
+    if "chop" in reason:
+        return "Operazione annullata: mercato LATERALE, nessuna direzione chiara"
+    if "against htf" in reason:
+        return "Operazione annullata: andava CONTRO l'andamento di fondo"
+    if "overextended" in reason or "chasing" in reason:
+        return "Operazione annullata: prezzo troppo lontano dalla media (inseguirebbe)"
+    return "Operazione annullata (contro l'andamento)"
+
+
 def _humanize(lines: list[str]) -> list[dict]:
     """Turn key log lines into plain-Italian one-liners with a colour 'kind'."""
     out: list[dict] = []
@@ -97,8 +138,18 @@ def _humanize(lines: list[str]) -> list[dict]:
                 "sell": "Gli analisti vogliono VENDERE",
             }.get(r, m)
             k = "dec"
+        elif "market gate short-circuit" in low:
+            # The graph stopped right after the market analyst: no debate/PM
+            # was run at all (cost saving), which is different from a veto of a
+            # completed decision — say so explicitly.
+            h = (
+                "Analisi fermata subito: l'analista non aveva dati affidabili (risparmio)"
+                if "no reliable" in low
+                else "Analisi fermata subito: l'analista consiglia di ASPETTARE (risparmio)"
+            )
+            k = "veto"
         elif "vetoed" in low:
-            h, k = "operazione annullata (andava contro l'andamento)", "veto"
+            h, k = _veto_message(low), "veto"
         elif "regime gate ok" in low:
             h, k = "operazione approvata", "ok"
         elif "no entry" in low:
@@ -111,6 +162,8 @@ def _humanize(lines: list[str]) -> list[dict]:
             h, k = "Chiusa un'operazione in GUADAGNO", "win"
         elif m.startswith("CLOSE ") and "via sl" in low:
             h, k = "Chiusa un'operazione in PERDITA", "loss"
+        elif "regime transition" in low:
+            h, k = "Cambio di andamento appena nato: analisi anticipata", "think"
         elif "regime not ready" in low:
             h, k = "Mercato indeciso: il bot resta fermo", "muted"
         elif "regime ready" in low:

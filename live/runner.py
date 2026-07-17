@@ -91,6 +91,15 @@ def run_once() -> dict:
         _emit("no_entry", rating=rating)
         return {"status": "no_entry", "rating": rating}
 
+    # 4.5 Analyst gate — veto entries the market analyst's report doesn't
+    # back (HOLD/neutral stance, no usable data, or the opposite direction).
+    ok, reason = guards.analyst_gate(
+        (full_state or {}).get("market_report", ""), side, enabled=cfg.analyst_gate
+    )
+    if not ok:
+        _emit("guard_blocked", rating=rating, side=side, reason=reason)
+        return {"status": "guard_blocked", "reason": reason}
+
     # 5. Pre-trade guards.
     ok, reason = guards.check_pre_trade(kraken, cfg)
     if not ok:

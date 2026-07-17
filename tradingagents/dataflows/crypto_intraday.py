@@ -16,6 +16,7 @@ get_indicators, and via a branch in the verified-snapshot path
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -31,6 +32,14 @@ _DEFAULT_BARS = 300
 _DEFAULT_VWAP_BARS = 96  # rolling VWAP window: 96 x 15m = 24h of "fair value"
 _INDICATOR_DISPLAY_BARS = 40  # how many recent bars to show in an indicator dump
 
+# Kraken's charts endpoint drops often (503s, empty responses). A single failed
+# attempt used to blind the whole market analyst for the cycle ("data
+# unavailable") while the paper-sim regime filter — which retries — kept seeing
+# the same candles fine. Retry with the same backoff the simulator uses.
+_OHLCV_ATTEMPTS = 3
+_OHLCV_BASE_SLEEP = 1.0  # seconds; grows linearly per attempt (1s, 2s)
+_sleep = time.sleep  # indirection so tests can stub the backoff
+
 _exchange = None  # public ccxt singleton (no API keys needed for OHLCV)
 
 
@@ -38,9 +47,41 @@ def _get_exchange():
     global _exchange
     if _exchange is None:
         import ccxt  # local import so non-intraday runs never require ccxt
-        _exchange = ccxt.kraken({"enableRateLimit": True})
-        _exchange.load_markets()
+        exchange = ccxt.kraken({"enableRateLimit": True})
+        # Load markets BEFORE publishing the singleton: assigning first would
+        # leave a half-initialised exchange (no markets) permanently cached if
+        # this network call fails once.
+        exchange.load_markets()
+        _exchange = exchange
     return _exchange
+
+
+def _fetch_ohlcv_with_retry(symbol: str, csym: str, timeframe: str, limit: int) -> list:
+    """Fetch OHLCV bars, retrying transient Kraken drops before giving up.
+
+    An empty bar list counts as a failure too (Kraken occasionally returns 200
+    with no data). Only after every attempt fails does this raise the typed
+    ``NoMarketDataError`` that the tool layer reports as "data unavailable".
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, _OHLCV_ATTEMPTS + 1):
+        try:
+            raw = _get_exchange().fetch_ohlcv(csym, timeframe=timeframe, limit=limit)
+            if raw:
+                return raw
+            last_err = ValueError("no intraday bars returned")
+        except Exception as e:  # noqa: BLE001 - every ccxt/network error is retryable here
+            last_err = e
+        if attempt < _OHLCV_ATTEMPTS:
+            logger.warning(
+                "kraken fetch_ohlcv %s %s attempt %d/%d failed (%s); retrying",
+                csym, timeframe, attempt, _OHLCV_ATTEMPTS, last_err,
+            )
+            _sleep(_OHLCV_BASE_SLEEP * attempt)
+    raise NoMarketDataError(
+        symbol, csym,
+        f"kraken fetch_ohlcv failed after {_OHLCV_ATTEMPTS} attempts: {last_err}",
+    )
 
 
 def _ccxt_symbol(symbol: str) -> str:
@@ -86,14 +127,7 @@ def fetch_intraday_ohlcv(symbol: str, timeframe: str | None = None, limit: int |
     timeframe = timeframe or _timeframe()
     limit = limit or _lookback_bars()
     csym = _ccxt_symbol(symbol)
-    try:
-        raw = _get_exchange().fetch_ohlcv(csym, timeframe=timeframe, limit=limit)
-    except NoMarketDataError:
-        raise
-    except Exception as e:  # noqa: BLE001 - turn any ccxt error into the typed sentinel
-        raise NoMarketDataError(symbol, csym, f"kraken fetch_ohlcv failed: {e}")
-    if not raw:
-        raise NoMarketDataError(symbol, csym, "no intraday bars returned")
+    raw = _fetch_ohlcv_with_retry(symbol, csym, timeframe, limit)
 
     df = pd.DataFrame(raw, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
     df["Date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_localize(None)

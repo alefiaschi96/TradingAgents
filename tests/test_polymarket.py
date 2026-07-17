@@ -124,6 +124,33 @@ class PolymarketRoutingTests(unittest.TestCase):
             out = interface.route_to_vendor("get_prediction_markets", "fed", 5)
         self.assertEqual(out, "POLY_OK")
 
+    def test_none_vendor_disables_without_network(self):
+        # Selecting the "none" vendor must route to the no-op (no request), so
+        # the source can be turned off where Polymarket is network-blocked.
+        set_config({"data_vendors": {"prediction_markets": "none"}})
+        with mock.patch.object(polymarket, "_request") as req:
+            out = interface.route_to_vendor("get_prediction_markets", "fed", 5)
+        req.assert_not_called()
+        self.assertIn("disabled", out.lower())
+
+
+class NewsAnalystPredictionMarketToggleTests(unittest.TestCase):
+    """The news analyst drops the tool and its instruction when disabled."""
+
+    def setUp(self):
+        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+    def tearDown(self):
+        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+    def test_message_mentions_tool_only_when_enabled(self):
+        from tradingagents.agents.analysts import news_analyst as na
+
+        self.assertIn("get_prediction_markets", na._intraday_system_message("asset", True))
+        self.assertNotIn("get_prediction_markets", na._intraday_system_message("asset", False))
+        self.assertIn("get_prediction_markets", na._daily_system_message("asset", True))
+        self.assertNotIn("get_prediction_markets", na._daily_system_message("asset", False))
+
 
 if __name__ == "__main__":
     unittest.main()

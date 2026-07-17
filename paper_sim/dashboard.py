@@ -121,6 +121,7 @@ def _veto_message(low: str) -> str:
 def _humanize(lines: list[str]) -> list[dict]:
     """Turn key log lines into plain-Italian one-liners with a colour 'kind'."""
     out: list[dict] = []
+    asset = _asset_name()
     for ln in lines:
         m = _msg(ln)
         low = m.lower()
@@ -155,13 +156,13 @@ def _humanize(lines: list[str]) -> list[dict]:
         elif "no entry" in low:
             h, k = "nessuna mossa, resta fermo", "muted"
         elif m.startswith("OPEN ") and " sell " in (" " + low + " "):
-            h, k = "Aperta una scommessa al RIBASSO (punta che scende)", "open"
+            h, k = f"Aperta una scommessa su {asset} al RIBASSO (punta che scende)", "open"
         elif m.startswith("OPEN "):
-            h, k = "Aperta una scommessa al RIALZO (punta che sale)", "open"
+            h, k = f"Aperta una scommessa su {asset} al RIALZO (punta che sale)", "open"
         elif m.startswith("CLOSE ") and "via tp" in low:
-            h, k = "Chiusa un'operazione in GUADAGNO", "win"
+            h, k = f"Chiusa un'operazione su {asset} in GUADAGNO", "win"
         elif m.startswith("CLOSE ") and "via sl" in low:
-            h, k = "Chiusa un'operazione in PERDITA", "loss"
+            h, k = f"Chiusa un'operazione su {asset} in PERDITA", "loss"
         elif "regime transition" in low:
             h, k = "Cambio di andamento appena nato: analisi anticipata", "think"
         elif "regime not ready" in low:
@@ -178,7 +179,31 @@ def _humanize(lines: list[str]) -> list[dict]:
             h, k = "Intoppo temporaneo, vado avanti", "warn"
         if h:
             out.append({"t": t, "h": h, "k": k})
-    return out[-9:]
+    return out
+
+
+def _event_lines() -> list[str]:
+    """Key 'moves' lines from ALL run logs in the dir, not just the current run.
+
+    'Ultime mosse' used to read only latest.log, so a restart wiped the history
+    (the fresh run only has 'Bot avviato'). Aggregate the key lines across every
+    *.log in the instrument's dir and sort chronologically so the feed survives
+    restarts. Logs are small (a few MB total) and we keep only key lines, so this
+    stays cheap on each poll."""
+    rows: list[str] = []
+    for path in glob.glob(os.path.join(_log_dir(), "*.log")):
+        if os.path.islink(path):  # skip latest.log -> avoids duplicating the current run
+            continue
+        try:
+            with open(path, "r", errors="replace") as fh:
+                for ln in fh:
+                    if (len(ln) >= 19 and ln[4:5] == "-" and "monitor open" not in ln
+                            and any(k in ln for k in _KEY)):
+                        rows.append(ln.rstrip("\n"))
+        except OSError:
+            continue
+    rows.sort(key=lambda l: l[:19])  # 'YYYY-MM-DD HH:MM:SS' prefix sorts chronologically
+    return rows
 
 
 def _current_price(lines: list[str]) -> float | None:
@@ -197,7 +222,12 @@ def _price_path(lines: list[str], entry: float) -> list[float]:
     candle logged since the last OPEN. Built from the bot's own log — no network."""
     start = 0
     for i, ln in enumerate(lines):
-        if "OPEN PF" in ln:
+        # The execution line is `... | OPEN sell PF_ADAUSD @ 0.1519 ...`; match on
+        # " PF_" so we DON'T also match the per-minute STATUS line ("OPEN sell @ ..."),
+        # which has no symbol. Resetting here keeps the previous trade's candles out
+        # of the current chart (was greping "OPEN PF", which never appears -> start=0
+        # -> the chart spliced the prior position's price path onto this one).
+        if "OPEN " in ln and " PF_" in ln:
             start = i
     pts = [entry]
     for ln in lines[start:]:
@@ -270,7 +300,7 @@ def _snapshot() -> dict:
             s = None
 
     snap: dict = {"stale": stale, "age_min": age, "last_log": last_log,
-                  "events": _humanize([ln for ln in lines if any(k in ln for k in _KEY)])}
+                  "events": _humanize(_event_lines())}
 
     if s:
         eq = float(s.get("equity", 0.0))
@@ -293,13 +323,14 @@ def _snapshot() -> dict:
                     "win": (t.get("pnl", 0) or 0) >= 0,
                     "pnl": t.get("pnl"),
                 }
-                for t in closed[-8:]
+                for t in closed
             ],
         )
     else:
         snap.update(start=None, equity=None, pnl=0, ret=0, up=True, trades=0,
                     wins=0, losses=0, winrate=0, equity_curve=[], bet=None, closed=[])
 
+    snap["asset"] = _asset_name()
     if stale:
         snap["head"] = {"text": "Il bot sembra BLOCCATO", "kind": "bad"}
     elif snap["bet"]:
@@ -573,14 +604,20 @@ async function tick(){
  }else{pill.innerHTML='';
   body.innerHTML='<div class="dim" style="padding:6px 0 4px">Nessuna scommessa aperta — il bot sta aspettando il momento giusto.</div>';}
 
- document.getElementById('events').innerHTML=(s.events||[]).slice().reverse()
+ // Re-rendering innerHTML resets scrollTop; save & restore it so the user can
+ // scroll the full (now uncapped) lists without them jumping back every poll.
+ const evEl=document.getElementById('events'), evTop=evEl.scrollTop;
+ evEl.innerHTML=(s.events||[]).slice().reverse()
    .map(e=>`<li><span class="d ${e.k||''}"></span><span class="t">${e.t}</span><span>${e.h}</span></li>`).join('')
    ||'<li class="dim">nessuna mossa ancora</li>';
- document.getElementById('closed').innerHTML=(s.closed||[]).slice().reverse()
-   .map(t=>`<tr><td class="dim">${t.at}</td><td>${t.up?'📈 Rialzo':'📉 Ribasso'}</td>
+ evEl.scrollTop=evTop;
+ const clEl=document.getElementById('closed'), clBox=clEl.closest('.scroll'), clTop=clBox?clBox.scrollTop:0;
+ clEl.innerHTML=(s.closed||[]).slice().reverse()
+   .map(t=>`<tr><td class="dim">${t.at}</td><td>${t.up?'📈 Rialzo':'📉 Ribasso'} <b>${s.asset||''}</b></td>
      <td><span class="chip ${t.win?'win':'loss'}">${t.win?'obiettivo':'stop'}</span></td>
      <td class="${t.win?'green':'red'} num">${(t.pnl>=0?'+':'')+f(t.pnl)} $</td></tr>`).join('')
    ||'<tr><td colspan="4" class="dim">ancora nessuna operazione chiusa</td></tr>';
+ if(clBox)clBox.scrollTop=clTop;
 }
 tick();setInterval(tick,3000);
 </script></body></html>"""
@@ -660,7 +697,8 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/reasoning"):
             self._send(_REASONING_PAGE.encode("utf-8"), "text/html; charset=utf-8")
         else:
-            self._send(_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            page = _PAGE.replace("Il mio bot", f"Bot {_asset_name()}", 1)
+            self._send(page.encode("utf-8"), "text/html; charset=utf-8")
 
     def log_message(self, *args) -> None:
         pass

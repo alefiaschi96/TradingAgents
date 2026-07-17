@@ -45,6 +45,7 @@ services:
     environment:
       TZ: Europe/Rome
       DASHBOARD_HOST: 0.0.0.0
+      SYMBOL: PF_SOLUSD
       PAPER_STATE_PATH: /data/SOL/state.json
       PAPER_LOG_DIR: /data/SOL/logs
     ports:
@@ -65,6 +66,7 @@ services:
     environment:
       TZ: Europe/Rome
       DASHBOARD_HOST: 0.0.0.0
+      SYMBOL: PF_ADAUSD
       PAPER_STATE_PATH: /data/ADA/state.json
       PAPER_LOG_DIR: /data/ADA/logs
     ports:
@@ -85,6 +87,7 @@ services:
     environment:
       TZ: Europe/Rome
       DASHBOARD_HOST: 0.0.0.0
+      SYMBOL: PF_XBTUSD
       PAPER_STATE_PATH: /data/BTC/state.json
       PAPER_LOG_DIR: /data/BTC/logs
     ports:
@@ -105,6 +108,7 @@ services:
     environment:
       TZ: Europe/Rome
       DASHBOARD_HOST: 0.0.0.0
+      SYMBOL: PF_HYPEUSD
       PAPER_STATE_PATH: /data/HYPE/state.json
       PAPER_LOG_DIR: /data/HYPE/logs
     ports:

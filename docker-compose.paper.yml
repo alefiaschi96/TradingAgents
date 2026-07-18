@@ -116,6 +116,60 @@ services:
     depends_on:
       - hype
 
+  # --- profilo "tuned": stessi simboli di sol/hype ma con i fix di rischio
+  # attivi (A/B test contro il profilo aggressivo, che resta invariato).
+  sol-tuned:
+    <<: *daemon
+    environment: &tuned-sol-env
+      TZ: Europe/Rome
+      SYMBOL: PF_SOLUSD
+      PAPER_STATE_PATH: /data/SOL_TUNED/state.json
+      PAPER_LOG_DIR: /data/SOL_TUNED/logs
+      STOP_ATR_MULT: "2.0"
+      TAKE_PROFIT_RR: "2.0"
+      RISK_PCT_PER_TRADE: "2"
+      MIN_TP_COST_MULT: "4"
+      TIME_STOP_HOURS: "6"
+      REGIME_PERSIST_TICKS: "3"
+      REGIME_EXIT_CHECK: "1"
+
+  sol-tuned-dashboard:
+    <<: *dashboard
+    environment:
+      <<: *tuned-sol-env
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_LABEL: SOL-TUNED
+    ports:
+      - "127.0.0.1:8769:8765"
+    depends_on:
+      - sol-tuned
+
+  hype-tuned:
+    <<: *daemon
+    environment: &tuned-hype-env
+      TZ: Europe/Rome
+      SYMBOL: PF_HYPEUSD
+      PAPER_STATE_PATH: /data/HYPE_TUNED/state.json
+      PAPER_LOG_DIR: /data/HYPE_TUNED/logs
+      STOP_ATR_MULT: "2.0"
+      TAKE_PROFIT_RR: "2.0"
+      RISK_PCT_PER_TRADE: "2"
+      MIN_TP_COST_MULT: "4"
+      TIME_STOP_HOURS: "6"
+      REGIME_PERSIST_TICKS: "3"
+      REGIME_EXIT_CHECK: "1"
+
+  hype-tuned-dashboard:
+    <<: *dashboard
+    environment:
+      <<: *tuned-hype-env
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_LABEL: HYPE-TUNED
+    ports:
+      - "127.0.0.1:8770:8765"
+    depends_on:
+      - hype-tuned
+
   caddy:
     image: caddy:2
     restart: unless-stopped

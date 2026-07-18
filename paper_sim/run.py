@@ -38,6 +38,12 @@ def main() -> int:
         decision_interval_min=float(os.environ.get("DECISION_INTERVAL_MIN", "40")),
         analysis_min_gap_min=float(os.environ.get("ANALYSIS_MIN_GAP_MIN", "30")),
         event_sink=run_log.event,
+        # Optional risk fixes — all default-off (see PaperSimulator.__init__).
+        risk_pct_per_trade=float(os.environ.get("RISK_PCT_PER_TRADE", "0")),
+        min_tp_cost_mult=float(os.environ.get("MIN_TP_COST_MULT", "0")),
+        time_stop_hours=float(os.environ.get("TIME_STOP_HOURS", "0")),
+        regime_persist_ticks=int(os.environ.get("REGIME_PERSIST_TICKS", "0")),
+        regime_exit_check=os.environ.get("REGIME_EXIT_CHECK", "0") == "1",
     )
     monitor_interval = float(os.environ.get("MONITOR_INTERVAL_SEC", "60"))
 

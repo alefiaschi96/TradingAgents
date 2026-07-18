@@ -28,3 +28,13 @@ hype.167.233.228.170.sslip.io {
 	import auth
 	reverse_proxy hype-dashboard:8765
 }
+
+soltuned.167.233.228.170.sslip.io {
+	import auth
+	reverse_proxy sol-tuned-dashboard:8765
+}
+
+hypetuned.167.233.228.170.sslip.io {
+	import auth
+	reverse_proxy hype-tuned-dashboard:8765
+}

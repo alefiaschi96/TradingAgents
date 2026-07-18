@@ -99,6 +99,11 @@ class PaperSimulator:
         slippage_pct_per_side: float = 0.0,
         analysis_min_gap_min: float = 30.0,
         event_sink=None,
+        risk_pct_per_trade: float = 0.0,
+        min_tp_cost_mult: float = 0.0,
+        time_stop_hours: float = 0.0,
+        regime_persist_ticks: int = 0,
+        regime_exit_check: bool = False,
     ):
         self.cfg = cfg
         self.state_path = state_path
@@ -115,6 +120,24 @@ class PaperSimulator:
         # directional read differs from this baseline is a fresh transition —
         # the birth of a trend — and may trigger an early analysis.
         self._prev_regime: str | None = None
+        # --- optional risk fixes, all off (0/False) by default so existing
+        # sims keep byte-identical behaviour; enable per-instance via env.
+        # Size positions off a fixed equity risk instead of full notional:
+        # notional = equity*risk% / stop%, still capped by balance_pct*leverage.
+        self.risk_pct_per_trade = risk_pct_per_trade
+        # Skip entries whose expected TP distance is under N× the round-trip
+        # cost (fees+slippage both sides) — no edge, pure churn.
+        self.min_tp_cost_mult = min_tp_cost_mult
+        # Close stagnant positions after N hours (neither SL nor TP hit).
+        self.time_stop_hours = time_stop_hours
+        # A regime transition must persist N consecutive ticks before it may
+        # trigger an early analysis (debounce for chop↔trend flapping).
+        self.regime_persist_ticks = regime_persist_ticks
+        # While a position is open, a clean opposite regime closes it instead
+        # of waiting for the stop.
+        self.regime_exit_check = regime_exit_check
+        self._pending_regime: str | None = None
+        self._pending_count = 0
         # Structured per-run event stream (JSONL). No-op when unset so the
         # simulator stays usable/testable without a run logger.
         self._emit_event = event_sink if event_sink is not None else (lambda *a, **k: None)
@@ -372,6 +395,7 @@ class PaperSimulator:
             # directional read counts as a fresh transition.
             self._log_regime(regime, reason, False)
             self._prev_regime = regime
+            self._pending_regime, self._pending_count = None, 0
             return False
         if self.decision_due(now_ts):  # cooldown elapsed: periodic re-check
             self._log_regime(regime, reason, True)
@@ -379,6 +403,17 @@ class PaperSimulator:
             return True
         directional = regime in ("up", "down")
         if directional and regime != prev and self._analysis_gap_elapsed(now_ts):
+            if self.regime_persist_ticks > 0:
+                # Debounce: the same fresh regime must be read N ticks in a row
+                # before it may spend an LLM run (chop↔trend flapping burned
+                # multiple identical analyses per hour without it).
+                if self._pending_regime == regime:
+                    self._pending_count += 1
+                else:
+                    self._pending_regime, self._pending_count = regime, 1
+                if self._pending_count < self.regime_persist_ticks:
+                    return False
+                self._pending_regime, self._pending_count = None, 0
             logger.info(
                 "regime transition (%s -> %s) — early analysis, cooldown bypassed: %s",
                 prev or "start", regime, reason,
@@ -442,14 +477,30 @@ class PaperSimulator:
         ref_price = self.last_price()
         entry = self._fill_price(ref_price, side)  # market entry slips against us
         equity = self.state["equity"]
-        margin = equity * self.cfg.balance_pct
-        notional = margin * self.cfg.leverage
-        size = self.kraken.amount_for_notional(notional, entry)
         # SL/TP are set relative to the real (slipped) entry, like live.
         # Stop width is fixed or ATR-scaled; TP is rr x the stop distance,
         # capped at the PM's stated price target when that is nearer.
         stop_pct = self._effective_stop_pct(entry)
         rr = self.cfg.take_profit_rr
+        cost_pct = 2.0 * (self.fee + self.slippage)  # full round trip, % of notional
+        if self.min_tp_cost_mult > 0 and stop_pct * rr < self.min_tp_cost_mult * cost_pct:
+            logger.info(
+                "entry VETOED by cost gate: expected TP %.3f%% < %.1fx round-trip cost %.3f%%",
+                stop_pct * rr, self.min_tp_cost_mult, cost_pct,
+            )
+            self._emit_event(
+                "veto", gate="cost", tp_pct=stop_pct * rr, cost_pct=cost_pct
+            )
+            return
+        margin = equity * self.cfg.balance_pct
+        notional = margin * self.cfg.leverage
+        if self.risk_pct_per_trade > 0 and stop_pct > 0:
+            # Fixed-fractional risk: losing this trade at the stop costs
+            # ~risk% of equity, however wide the (ATR) stop is. The leveraged
+            # notional above remains the hard ceiling.
+            risk_notional = equity * self.risk_pct_per_trade / stop_pct
+            notional = min(notional, risk_notional)
+        size = self.kraken.amount_for_notional(notional, entry)
         sl, tp_rr, _close_side = _bracket_prices(side, entry, stop_pct, rr)
         tp, tp_source = capped_tp(side, entry, tp_rr, analyst_target)
         if tp_source == "analyst_target":
@@ -490,11 +541,40 @@ class PaperSimulator:
         reason, exit_price = check_hit(pos["side"], pos["sl"], pos["tp"], high, low)
         if reason:
             self.close_position(exit_price, reason)
-        else:
+            return
+        if self.time_stop_hours > 0 and self._position_age_hours(pos) >= self.time_stop_hours:
             logger.info(
-                "monitor open %s: 1m range [%.4f, %.4f] vs SL %.4f TP %.4f",
-                pos["side"], low, high, pos["sl"], pos["tp"],
+                "time stop: position open for %.1fh (limit %.1fh) with neither SL nor TP hit",
+                self._position_age_hours(pos), self.time_stop_hours,
             )
+            self.close_position(self.last_price(), "TIME")
+            return
+        if self.regime_exit_check:
+            ready, regime, reason_txt = self._regime_ready()
+            against = (regime == "down" and pos["side"] == "buy") or (
+                regime == "up" and pos["side"] == "sell"
+            )
+            if ready and against:
+                logger.info(
+                    "regime flipped against open %s (%s) — closing early instead of "
+                    "riding to the stop: %s", pos["side"], regime, reason_txt,
+                )
+                self.close_position(self.last_price(), "REGIME")
+                return
+        logger.info(
+            "monitor open %s: 1m range [%.4f, %.4f] vs SL %.4f TP %.4f",
+            pos["side"], low, high, pos["sl"], pos["tp"],
+        )
+
+    @staticmethod
+    def _position_age_hours(pos: dict) -> float:
+        try:
+            opened = datetime.fromisoformat(pos["opened_at"])
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
 
     def close_position(self, trigger_price: float, reason: str) -> None:
         pos = self.state["open"]

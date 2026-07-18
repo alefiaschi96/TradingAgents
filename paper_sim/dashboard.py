@@ -100,6 +100,8 @@ def _veto_message(low: str) -> str:
     gate: chop / against the higher-timeframe trend / overextended. Unknown or
     older unlabelled vetoes fall back to a generic line."""
     reason = low.split("gate:", 1)[1].strip() if "gate:" in low else low
+    if "cost gate" in low:
+        return "Operazione annullata: obiettivo troppo piccolo rispetto ai costi (commissioni)"
     if "analyst gate" in low:
         if "no reliable" in reason:
             return "Operazione annullata: l'analista di mercato non aveva dati affidabili"
@@ -163,6 +165,10 @@ def _humanize(lines: list[str]) -> list[dict]:
             h, k = f"Chiusa un'operazione su {asset} in GUADAGNO", "win"
         elif m.startswith("CLOSE ") and "via sl" in low:
             h, k = f"Chiusa un'operazione su {asset} in PERDITA", "loss"
+        elif m.startswith("CLOSE ") and "via time" in low:
+            h, k = f"Chiusa un'operazione su {asset} per TEMPO scaduto (non si muoveva)", "muted"
+        elif m.startswith("CLOSE ") and "via regime" in low:
+            h, k = f"Chiusa un'operazione su {asset} in anticipo: il mercato si è GIRATO", "warn"
         elif "regime transition" in low:
             h, k = "Cambio di andamento appena nato: analisi anticipata", "think"
         elif "regime not ready" in low:
@@ -248,6 +254,9 @@ def _asset_name() -> str:
     import re
     from live.config import _KRAKEN_BASE_ALIASES
 
+    label = os.environ.get("DASHBOARD_LABEL")
+    if label:
+        return label
     sym = (os.environ.get("ANALYSIS_SYMBOL") or os.environ.get("SYMBOL") or "").upper()
     s = re.sub(r"^PF_", "", sym)
     s = re.split(r"[-/]", s)[0]

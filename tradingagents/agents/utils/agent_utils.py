@@ -132,13 +132,39 @@ def get_scenario_instruction() -> str:
     else:
         direction = "You may take a LONG, or stay FLAT (shorts are disabled)."
 
+    risk_pct = config.get("risk_pct_per_trade") or 0
+    if risk_pct:
+        sizing_txt = (
+            f"Each position is sized so a stop-out risks ~{risk_pct:g}% of equity "
+            f"(leverage is a cap, not a target)"
+        )
+    else:
+        sizing_txt = "Each position is sized automatically"
+
+    # Describe early exits only when they are actually armed, so the agents'
+    # mental model of the bracket matches the simulator's real behaviour.
+    early_exits = []
+    time_stop = config.get("time_stop_hours") or 0
+    if time_stop:
+        early_exits.append(
+            f"a time-stop closes stagnant positions after ~{time_stop:g}h"
+        )
+    if config.get("regime_exit_check"):
+        early_exits.append(
+            "a clean opposite higher-timeframe regime closes the position early"
+        )
+    if early_exits:
+        exit_txt = "held until stop/target unless " + " or ".join(early_exits)
+    else:
+        exit_txt = "then left until one is hit"
+
     scenario = (
         f" SCENARIO: you trade a crypto PERPETUAL FUTURE{instrument}{lev_txt}, "
         f"intraday on {tf} bars, holding ~1-2 hours. {direction} FLAT is the "
         f"default and the correct choice whenever there is no clear directional "
-        f"edge — never take a position just to be active. Each position is sized "
-        f"automatically and bracketed by a volatility-based stop and a take-profit "
-        f"at {rr_txt} the stop distance, then left until one is hit; one position "
+        f"edge — never take a position just to be active. {sizing_txt} and "
+        f"bracketed by a volatility-based stop and a take-profit "
+        f"at {rr_txt} the stop distance, {exit_txt}; one position "
         f"at a time. Reason only from intraday price action and fresh catalysts."
     )
 

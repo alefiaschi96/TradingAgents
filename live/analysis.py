@@ -128,6 +128,13 @@ def build_config(cfg) -> dict:
         config["symbol"] = cfg.symbol
         config["analysis_symbol"] = cfg.analysis_symbol
         config["stop_mode"] = cfg.stop_mode
+        # Paper-sim risk features (env-gated, 0/off = absent): surfaced to the
+        # agents via get_scenario_instruction so their mental model of the
+        # execution matches what the simulator will actually do (#Paul: agents
+        # must know the mechanics they trade under).
+        config["risk_pct_per_trade"] = float(os.environ.get("RISK_PCT_PER_TRADE", "0"))
+        config["time_stop_hours"] = float(os.environ.get("TIME_STOP_HOURS", "0"))
+        config["regime_exit_check"] = os.environ.get("REGIME_EXIT_CHECK", "0") == "1"
         # Placeholder; run_analysis fills this with the live regime read just
         # before building the graph (kept here so the key always exists).
         config["regime_context"] = ""

@@ -68,25 +68,61 @@ def get_funding_rate(
         if rate is None:
             return "data unavailable"
 
-        # Recent trend, if the history endpoint is available.
+        # --- Historical trend (last 6–8 periods) with acceleration ---
         trend = ""
+        hist_table = ""
         try:
             hist = ex.fetch_funding_rate_history(fsym, limit=8)
-            rates = [h.get("fundingRate") for h in hist if h.get("fundingRate") is not None]
+            entries = []
+            for h in hist:
+                r = h.get("fundingRate")
+                ts = h.get("timestamp") or h.get("datetime")
+                if r is not None:
+                    entries.append((ts, r))
+            rates = [e[1] for e in entries]
+
             if len(rates) >= 2:
                 avg = sum(rates) / len(rates)
                 direction = "rising" if rates[-1] > rates[0] else "falling"
+
+                # Acceleration: is the rate change accelerating?
+                deltas = [rates[i] - rates[i - 1] for i in range(1, len(rates))]
+                accel = ""
+                if len(deltas) >= 2:
+                    second_deltas = [deltas[i] - deltas[i - 1] for i in range(1, len(deltas))]
+                    avg_accel = sum(second_deltas) / len(second_deltas)
+                    if abs(avg_accel) > 1e-6:
+                        accel_dir = "accelerating" if (
+                            (direction == "rising" and avg_accel > 0) or
+                            (direction == "falling" and avg_accel < 0)
+                        ) else "decelerating"
+                        accel = f" Rate change is **{accel_dir}**."
+
+                # Crowding trade flag
+                crowding = ""
+                if all(rates[i] >= rates[i - 1] for i in range(1, len(rates))):
+                    crowding = " ⚠ Monotonically rising — signals a crowding long trade."
+                elif all(rates[i] <= rates[i - 1] for i in range(1, len(rates))):
+                    crowding = " ⚠ Monotonically falling — signals a crowding short trade."
+
                 trend = (
-                    f" Recent trend: {direction} "
-                    f"(last {len(rates)} points avg {avg * 100:.4f}%)."
+                    f" Trend: {direction} over {len(rates)} periods "
+                    f"(avg {avg * 100:.4f}%).{accel}{crowding}"
                 )
+
+                # Build individual-rate table
+                lines = ["\n| Period | Rate (%) |", "|---|---:|"]
+                for ts_val, r_val in entries:
+                    ts_str = str(ts_val)[:16] if ts_val else "?"
+                    lines.append(f"| {ts_str} | {r_val * 100:.4f}% |")
+                hist_table = "\n".join(lines)
         except Exception:  # noqa: BLE001 - history is best-effort
             trend = ""
 
         side = "longs pay shorts (crowded long)" if rate > 0 else (
             "shorts pay longs (crowded short)" if rate < 0 else "neutral"
         )
-        return f"Funding rate for {fsym}: {rate * 100:.4f}% — {side}.{trend}"
+        return f"Funding rate for {fsym}: {rate * 100:.4f}% — {side}.{trend}{hist_table}"
     except Exception:  # noqa: BLE001 - never propagate
         return "data unavailable"
 
@@ -195,3 +231,87 @@ def get_orderbook_imbalance(
         )
     except Exception:  # noqa: BLE001 - never propagate
         return "data unavailable"
+
+
+@tool
+def get_btc_trend(
+    symbol: Annotated[
+        str,
+        "The ticker you are currently analyzing (NOT BTC). This is used "
+        "only for labelling; BTC data is fetched automatically.",
+    ],
+) -> str:
+    """Determine whether BTC is bullish or bearish for the current day.
+
+    Fetches BTC/USD 1h bars for the last 24h from Kraken spot, computes:
+    - price vs today's UTC open
+    - 9-bar EMA vs 21-bar EMA alignment
+
+    Returns a one-line classification: BULLISH / BEARISH / NEUTRAL plus
+    supporting data. Use this to understand the macro crypto direction when
+    analyzing a non-BTC asset.
+
+    Args:
+        symbol: The current ticker being analyzed (for labelling only).
+
+    Returns:
+        str: BTC intraday trend summary, or 'data unavailable' on error.
+    """
+    try:
+        # Use the spot Kraken exchange (same singleton as crypto_intraday)
+        from tradingagents.dataflows.crypto_intraday import (
+            _ccxt_symbol,
+            _fetch_ohlcv_with_retry,
+        )
+
+        btc_csym = _ccxt_symbol("BTC-USD")
+        raw = _fetch_ohlcv_with_retry("BTC-USD", btc_csym, "1h", 24)
+        if not raw or len(raw) < 3:
+            return "BTC trend data unavailable"
+
+        closes = [float(c[4]) for c in raw]
+        opens = [float(c[1]) for c in raw]
+        current_price = closes[-1]
+
+        # Today's open: first bar whose date matches UTC today
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date()
+        today_open = None
+        for bar in raw:
+            bar_date = datetime.fromtimestamp(bar[0] / 1000, tz=timezone.utc).date()
+            if bar_date == today:
+                today_open = float(bar[1])
+                break
+        if today_open is None:
+            today_open = opens[0]
+
+        # EMA9 / EMA21
+        def _ema(values, period):
+            k = 2.0 / (period + 1)
+            ema = values[0]
+            for v in values[1:]:
+                ema = v * k + ema * (1.0 - k)
+            return ema
+
+        ema9 = _ema(closes, 9) if len(closes) >= 9 else closes[-1]
+        ema21 = _ema(closes, 21) if len(closes) >= 21 else closes[-1]
+
+        above_open = current_price > today_open
+        ema_bullish = ema9 > ema21
+
+        if above_open and ema_bullish:
+            label = "BULLISH"
+        elif not above_open and not ema_bullish:
+            label = "BEARISH"
+        else:
+            label = "NEUTRAL"
+
+        pct = (current_price - today_open) / today_open * 100 if today_open else 0
+        return (
+            f"BTC intraday trend: **{label}** — "
+            f"price {current_price:.2f} vs today's open {today_open:.2f} "
+            f"({pct:+.2f}%), EMA9({ema9:.2f}) {'>' if ema_bullish else '<='} "
+            f"EMA21({ema21:.2f}) on 1h bars."
+        )
+    except Exception:  # noqa: BLE001 — never propagate
+        return "BTC trend data unavailable"

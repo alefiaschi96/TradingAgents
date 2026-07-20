@@ -26,9 +26,11 @@ DEFAULT_SNAPSHOT_INDICATORS: tuple[str, ...] = (
 )
 
 # Intraday snapshot set: fast EMAs, VWAP (the intraday fair-value anchor),
-# momentum, volatility — periods are in bars, not days.
+# session VWAP with bands, momentum, volatility — periods are in bars, not days.
 INTRADAY_SNAPSHOT_INDICATORS: tuple[str, ...] = (
     "close_9_ema", "close_21_ema", "vwap",
+    "session_vwap", "svwap_1s_upper", "svwap_1s_lower",
+    "svwap_2s_upper", "svwap_2s_lower",
     "rsi", "boll", "boll_ub", "boll_lb",
     "macd", "macds", "macdh", "atr",
 )
@@ -50,7 +52,9 @@ def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:
     if get_config().get("intraday"):
         from tradingagents.dataflows.crypto_intraday import fetch_intraday_ohlcv
 
-        df = fetch_intraday_ohlcv(symbol)
+        # Use the 10m series (primary) for the verified snapshot —
+        # it has the most recent price and matches the trade horizon.
+        df = fetch_intraday_ohlcv(symbol, timeframe="10m", limit=12)
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date"]).sort_values("Date")
         if df.empty:
@@ -107,10 +111,16 @@ def build_verified_market_snapshot(
     default_set = INTRADAY_SNAPSHOT_INDICATORS if intraday else DEFAULT_SNAPSHOT_INDICATORS
     selected = tuple(indicators or default_set)
     indicator_values: dict[str, str] = {}
+    # Session-VWAP columns live on the raw df, not in stockstats
+    _SVWAP_COLS = {"session_vwap", "svwap_1s_upper", "svwap_1s_lower",
+                   "svwap_2s_upper", "svwap_2s_lower"}
     for name in selected:
         try:
-            stock_df[name]  # triggers stockstats calculation
-            indicator_values[name] = _fmt(stock_df.iloc[-1][name])
+            if name in _SVWAP_COLS and name in df.columns:
+                indicator_values[name] = _fmt(df.iloc[-1][name])
+            else:
+                stock_df[name]  # triggers stockstats calculation
+                indicator_values[name] = _fmt(stock_df.iloc[-1][name])
         except Exception as exc:  # noqa: BLE001 — one bad indicator shouldn't sink the snapshot
             indicator_values[name] = f"N/A ({type(exc).__name__})"
 

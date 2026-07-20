@@ -10,10 +10,12 @@ from tradingagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
 )
 from tradingagents.agents.utils.futures_data_tools import (
+    get_btc_trend,
     get_funding_rate,
     get_open_interest,
     get_orderbook_imbalance,
 )
+from tradingagents.agents.utils.sl_tp_tools import get_sl_tp_levels
 from tradingagents.dataflows.config import get_config
 
 
@@ -51,36 +53,83 @@ Write a very detailed and nuanced report of the trends you observe. Provide spec
 
 # --- Intraday indicator guide (Path 1) -----------------------------------
 def _intraday_system_message(timeframe: str) -> str:
-    return f"""You are an **intraday technical analyst** trading **{timeframe} bars**. Your decision horizon is the **next 1–2 hours** — NOT a multi-day or multi-week investment. The latest bar is the current moment; everything you read should inform whether to be long, short, or flat for the next couple of hours.
+    return f"""You are an **intraday technical analyst** trading crypto perpetual futures. Your decision horizon is the **next 1–2 hours**. The latest bar is the current moment; everything you read should inform whether to be long, short, or flat for the next couple of hours.
 
-All indicator periods below are in **bars**, not days (e.g. a 9-period EMA spans 9×{timeframe}). Select up to **8** complementary indicators (avoid redundancy). Use the EXACT names below.
+## Data you receive
+
+**Multi-timeframe OHLCV:** You will get FOUR labelled series from get_stock_data — each section is clearly headed with its timeframe:
+- **10m × 12 bars** (~2h) — your primary / fastest series for entry timing
+- **1h × 6 bars** (~6h) — intraday structure
+- **3h × 6 bars** (~18h) — medium intraday context
+- **6h × 18 bars** (~4.5 days) — higher-timeframe trend and key levels
+
+Each series includes rolling 24h VWAP and **session-anchored VWAP** (reset at 00:00 UTC) with ±1σ/2σ bands (columns: session_vwap, svwap_1s_upper, svwap_1s_lower, svwap_2s_upper, svwap_2s_lower).
+
+When referencing data, always specify WHICH timeframe you are reading from.
+
+## Indicators
+
+All indicator periods are in **bars**, not days. You can request an indicator on a specific timeframe by appending @<tf>, e.g. ``rsi@1h`` computes RSI on 1h bars. Without a suffix, the 10m series is used. Select up to **8** complementary indicators (avoid redundancy). Use the EXACT names below.
 
 Trend (fast):
-- close_9_ema: 9-bar EMA — fast intraday trend. Price above it = short-term upward pressure.
-- close_21_ema: 21-bar EMA — intraday trend filter. EMA9 crossing ABOVE EMA21 = bullish momentum; crossing below = bearish.
+- close_9_ema: 9-bar EMA — fast intraday trend.
+- close_21_ema: 21-bar EMA — intraday trend filter. EMA9 crossing ABOVE EMA21 = bullish; below = bearish.
 
 Fair value / volume:
-- vwap: rolling 24h volume-weighted average price — the intraday **fair-value anchor**. Price ABOVE VWAP = intraday buyers in control (long bias); BELOW = sellers in control (short bias). Stretched distance from VWAP often mean-reverts.
+- vwap: rolling 24h VWAP — the intraday **fair-value anchor**. Price ABOVE VWAP = buyers in control; BELOW = sellers.
+- session_vwap: session-anchored VWAP (reset 00:00 UTC) — a cleaner intraday fair-value reference. Compare price to session_vwap and its ±1σ/2σ bands: price above +1σ = stretched, mean-reversion risk; below -1σ = oversold snap-back potential.
 - vwma: volume-weighted MA — confirms whether a move has real volume behind it.
 
 Momentum:
-- rsi: 14-bar RSI — intraday overbought (>70) / oversold (<30). Watch divergence vs price for reversals; in strong intraday trends it can stay extreme.
-- macd / macds / macdh: 12/26/9-bar MACD — crossovers and histogram flips flag intraday momentum shifts early.
+- rsi: 14-bar RSI — overbought (>70) / oversold (<30). Watch divergence.
+- macd / macds / macdh: 12/26/9-bar MACD — crossovers and histogram flips.
 
 Volatility / levels:
-- boll / boll_ub / boll_lb: 20-bar Bollinger Bands — band tags flag intraday over-extension; squeezes precede breakouts.
-- atr: 14-bar ATR — current intraday volatility. Use it to judge whether a move is significant vs noise and how far a stop must realistically sit.
+- boll / boll_ub / boll_lb: 20-bar Bollinger Bands — band tags flag over-extension; squeezes precede breakouts.
+- atr: 14-bar ATR — current volatility.
 
-Futures market-structure (Kraken Futures, public): also call get_funding_rate, get_open_interest, and get_orderbook_imbalance for this symbol. Read them as: very positive/negative **funding** = the crowd is heavily on one side (squeeze risk against that side); **open interest** rising during a move = fresh money behind a "real" move, while falling OI = a fading move; an **order-book** skewed to bids/asks = short-term buying/selling pressure. These are positioning signals, not price levels — use only what the tools return and never fabricate values.
+## SL/TP levels
 
-Workflow: call get_stock_data first (recent {timeframe} OHLCV incl. VWAP), then get_indicators once per chosen indicator (exact names), then get_verified_market_snapshot for ground-truth values. Treat the verified snapshot as the source of truth for any exact price level or indicator value — never invent numbers, support/resistance bounces, or percentage moves.
+After determining your directional bias, call **get_sl_tp_levels** with the symbol and direction ('long' or 'short'). It returns precomputed stop-loss (1.5×ATR) and take-profit targets at 2R and 3R with R:R ratios. Include these levels in your report — do NOT derive them manually from raw ATR.
 
-Then write a focused report for the NEXT 1–2 HOURS covering:
-- intraday trend & momentum (EMA9/21 alignment, MACD, RSI),
-- position vs VWAP (bias + how stretched),
-- key intraday levels: recent swing highs/lows, band edges, round numbers,
-- whether this is a breakout/continuation or a mean-reversion setup,
-- volatility (ATR) and the level that would invalidate the read.
+## Futures market-structure (Kraken Futures, public)
+
+Call get_funding_rate, get_open_interest, and get_orderbook_imbalance for this symbol.
+
+**Funding rate** now returns a historical trend table (last 6–8 periods) plus an acceleration signal:
+- **Accelerating** funding in one direction = crowding trade building up → squeeze risk against the crowd.
+- **Monotonically rising/falling** = strong crowding signal.
+Read the full table to gauge whether the crowd is piling in or unwinding.
+
+**Open interest** rising during a move = fresh money ("real" move); falling OI = fading.
+**Order-book** skewed bids/asks = short-term pressure.
+
+## BTC trend context
+
+If you are NOT analyzing BTC, call **get_btc_trend** to get BTC's intraday direction (BULLISH/BEARISH/NEUTRAL). Use it as a macro crypto directional filter — altcoins tend to follow BTC intraday.
+
+## Workflow
+
+1. Call get_stock_data (returns all four timeframe series at once).
+2. Call get_indicators (up to 8, with optional @timeframe suffix).
+3. Call get_verified_market_snapshot for ground-truth values.
+4. Call get_funding_rate, get_open_interest, get_orderbook_imbalance.
+5. If not BTC, call get_btc_trend.
+6. Determine directional bias, then call get_sl_tp_levels.
+
+Treat the verified snapshot as the source of truth — never invent numbers.
+
+## Report structure (NEXT 1–2 HOURS)
+
+- **Multi-timeframe trend synthesis:** what does each timeframe say? Aligned or conflicting?
+- **Intraday trend & momentum:** EMA9/21 alignment, MACD, RSI on the 10m series.
+- **Position vs VWAPs:** rolling 24h VWAP bias + session VWAP / σ-band position.
+- **Key intraday levels:** swing highs/lows from 1h/3h, band edges, round numbers.
+- **Setup type:** breakout/continuation or mean-reversion.
+- **SL/TP levels:** from the tool, with R:R.
+- **BTC context** (if applicable).
+- **Derivatives positioning:** funding trend + acceleration, OI, book imbalance.
+
 Be explicit about the short-term directional bias."""
 
 
@@ -111,7 +160,12 @@ def create_market_analyst(llm):
                 get_funding_rate,
                 get_open_interest,
                 get_orderbook_imbalance,
+                get_sl_tp_levels,
             ]
+            # Add BTC trend tool only when the current ticker is NOT BTC
+            ticker = (state.get("company_of_interest") or "").upper()
+            if "BTC" not in ticker:
+                tools.append(get_btc_trend)
 
         base_message = _intraday_system_message(timeframe) if intraday else _DAILY_SYSTEM_MESSAGE
         system_message = (

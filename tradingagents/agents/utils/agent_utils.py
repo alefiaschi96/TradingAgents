@@ -158,6 +158,15 @@ def get_scenario_instruction() -> str:
     else:
         exit_txt = "then left until one is hit"
 
+    min_rr = config.get("min_analyst_rr") or 0
+    target_rule = (
+        f" Trades whose stated price target lies nearer than ~{min_rr:g}x the stop "
+        f"distance are SKIPPED automatically — if you see real edge, state a price "
+        f"target with room to run; a timid target equals no trade."
+        if min_rr
+        else ""
+    )
+
     scenario = (
         f" SCENARIO: you trade a crypto PERPETUAL FUTURE{instrument}{lev_txt}, "
         f"intraday on {tf} bars, holding ~1-2 hours. {direction} FLAT is the "
@@ -165,7 +174,8 @@ def get_scenario_instruction() -> str:
         f"edge — never take a position just to be active. {sizing_txt} and "
         f"bracketed by a volatility-based stop and a take-profit "
         f"at {rr_txt} the stop distance, {exit_txt}; one position "
-        f"at a time. Reason only from intraday price action and fresh catalysts."
+        f"at a time.{target_rule} Reason only from intraday price action and "
+        f"fresh catalysts."
     )
 
     # Optional higher-timeframe regime read, injected as INFORMATION only. It

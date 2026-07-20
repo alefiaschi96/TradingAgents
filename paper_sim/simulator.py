@@ -104,6 +104,7 @@ class PaperSimulator:
         time_stop_hours: float = 0.0,
         regime_persist_ticks: int = 0,
         regime_exit_check: bool = False,
+        min_analyst_rr: float = 0.0,
     ):
         self.cfg = cfg
         self.state_path = state_path
@@ -136,6 +137,11 @@ class PaperSimulator:
         # While a position is open, a clean opposite regime closes it instead
         # of waiting for the stop.
         self.regime_exit_check = regime_exit_check
+        # When the PM's own price target implies less than N x the stop
+        # distance, skip the trade entirely (never trade a bad ratio: a
+        # near target used to silently cap the TP and invert the win/loss
+        # asymmetry the RR bracket is designed for).
+        self.min_analyst_rr = min_analyst_rr
         self._pending_regime: str | None = None
         self._pending_count = 0
         # Structured per-run event stream (JSONL). No-op when unset so the
@@ -492,6 +498,20 @@ class PaperSimulator:
                 "veto", gate="cost", tp_pct=stop_pct * rr, cost_pct=cost_pct
             )
             return
+        if self.min_analyst_rr > 0 and analyst_target is not None and stop_pct > 0:
+            tgt_dist = analyst_target - entry if side == "buy" else entry - analyst_target
+            implied_rr = (tgt_dist / entry * 100.0) / stop_pct
+            if implied_rr < self.min_analyst_rr:
+                logger.info(
+                    "entry VETOED by target gate: analysts' own price target %.4f "
+                    "implies %.2fx the stop (floor %.1fx) — not enough room to run",
+                    analyst_target, implied_rr, self.min_analyst_rr,
+                )
+                self._emit_event(
+                    "veto", gate="target", analyst_target=analyst_target,
+                    implied_rr=implied_rr, floor=self.min_analyst_rr,
+                )
+                return
         margin = equity * self.cfg.balance_pct
         notional = margin * self.cfg.leverage
         if self.risk_pct_per_trade > 0 and stop_pct > 0:

@@ -132,6 +132,7 @@ services:
       TIME_STOP_HOURS: "6"
       REGIME_PERSIST_TICKS: "3"
       REGIME_EXIT_CHECK: "1"
+      MIN_ANALYST_RR: "1.5"
 
   sol-tuned-dashboard:
     <<: *dashboard
@@ -158,6 +159,7 @@ services:
       TIME_STOP_HOURS: "6"
       REGIME_PERSIST_TICKS: "3"
       REGIME_EXIT_CHECK: "1"
+      MIN_ANALYST_RR: "1.5"
 
   hype-tuned-dashboard:
     <<: *dashboard

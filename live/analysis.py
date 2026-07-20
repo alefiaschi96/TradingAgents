@@ -136,6 +136,7 @@ def build_config(cfg) -> dict:
         config["risk_pct_per_trade"] = float(os.environ.get("RISK_PCT_PER_TRADE", "0"))
         config["time_stop_hours"] = float(os.environ.get("TIME_STOP_HOURS", "0"))
         config["regime_exit_check"] = os.environ.get("REGIME_EXIT_CHECK", "0") == "1"
+        config["min_analyst_rr"] = float(os.environ.get("MIN_ANALYST_RR", "0"))
         # Placeholder; run_analysis fills this with the live regime read just
         # before building the graph (kept here so the key always exists).
         config["regime_context"] = ""

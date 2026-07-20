@@ -102,6 +102,8 @@ def _veto_message(low: str) -> str:
     reason = low.split("gate:", 1)[1].strip() if "gate:" in low else low
     if "cost gate" in low:
         return "Operazione annullata: obiettivo troppo piccolo rispetto ai costi (commissioni)"
+    if "target gate" in low:
+        return "Operazione annullata: gli analisti stessi vedono poco margine di corsa"
     if "analyst gate" in low:
         if "no reliable" in reason:
             return "Operazione annullata: l'analista di mercato non aveva dati affidabili"

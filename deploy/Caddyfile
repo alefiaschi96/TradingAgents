@@ -38,3 +38,13 @@ hypetuned.167.233.228.170.sslip.io {
 	import auth
 	reverse_proxy hype-tuned-dashboard:8765
 }
+
+solstruct.167.233.228.170.sslip.io {
+	import auth
+	reverse_proxy sol-struct-dashboard:8765
+}
+
+hypestruct.167.233.228.170.sslip.io {
+	import auth
+	reverse_proxy hype-struct-dashboard:8765
+}

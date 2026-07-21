@@ -172,6 +172,66 @@ services:
     depends_on:
       - hype-tuned
 
+  # --- profilo "struct": tuned + STRUCTURAL_SL (stop a doppio binario dal
+  # contratto del PM). Una sola variabile cambia rispetto alle tuned, che
+  # diventano gruppo di controllo — per questo solo SOL e HYPE: sono gli
+  # unici simboli con un profilo tuned da usare come controllo pulito.
+  sol-struct:
+    <<: *daemon
+    environment: &struct-sol-env
+      TZ: Europe/Rome
+      SYMBOL: PF_SOLUSD
+      PAPER_STATE_PATH: /data/SOL_STRUCT/state.json
+      PAPER_LOG_DIR: /data/SOL_STRUCT/logs
+      STOP_ATR_MULT: "2.0"
+      TAKE_PROFIT_RR: "2.0"
+      RISK_PCT_PER_TRADE: "2"
+      MIN_TP_COST_MULT: "4"
+      TIME_STOP_HOURS: "6"
+      REGIME_PERSIST_TICKS: "3"
+      REGIME_EXIT_CHECK: "1"
+      MIN_ANALYST_RR: "1.5"
+      STRUCTURAL_SL: "1"
+
+  sol-struct-dashboard:
+    <<: *dashboard
+    environment:
+      <<: *struct-sol-env
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_LABEL: SOL-STRUCT
+    ports:
+      - "127.0.0.1:8771:8765"
+    depends_on:
+      - sol-struct
+
+  hype-struct:
+    <<: *daemon
+    environment: &struct-hype-env
+      TZ: Europe/Rome
+      SYMBOL: PF_HYPEUSD
+      PAPER_STATE_PATH: /data/HYPE_STRUCT/state.json
+      PAPER_LOG_DIR: /data/HYPE_STRUCT/logs
+      STOP_ATR_MULT: "2.0"
+      TAKE_PROFIT_RR: "2.0"
+      RISK_PCT_PER_TRADE: "2"
+      MIN_TP_COST_MULT: "4"
+      TIME_STOP_HOURS: "6"
+      REGIME_PERSIST_TICKS: "3"
+      REGIME_EXIT_CHECK: "1"
+      MIN_ANALYST_RR: "1.5"
+      STRUCTURAL_SL: "1"
+
+  hype-struct-dashboard:
+    <<: *dashboard
+    environment:
+      <<: *struct-hype-env
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_LABEL: HYPE-STRUCT
+    ports:
+      - "127.0.0.1:8772:8765"
+    depends_on:
+      - hype-struct
+
   caddy:
     image: caddy:2
     restart: unless-stopped

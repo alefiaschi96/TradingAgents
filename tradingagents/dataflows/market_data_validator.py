@@ -130,9 +130,8 @@ def build_verified_market_snapshot(
     recent = df.tail(window)
 
     if intraday:
-        tf = get_config().get("intraday_timeframe", "15m")
         header_lines = [
-            f"## Verified market data snapshot for {symbol.upper()} ({tf} intraday bars)",
+            f"## Verified market data snapshot for {symbol.upper()} (10m primary intraday bars)",
             "",
             f"- Most recent bar (treat as the current moment): {latest_date} UTC",
             "- Bars run up to now; the latest bar is still forming.",

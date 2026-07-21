@@ -17,8 +17,14 @@ Multi-timeframe support
 ``fetch_multi_timeframe_ohlcv`` returns four labelled OHLCV series
 (10m×12, 1h×6, 3h×6, 6h×18) so the market analyst can reason across
 horizons.  The 10m series is the "primary" for indicators and the
-verified snapshot.  Kraken doesn't offer native 3h candles, so we
-resample from 1h×18.
+verified snapshot.
+
+Kraken's spot API only supports these native candle sizes: 1m, 5m, 15m,
+30m, 1h, 4h, 1d, 1w, 2w (verified via ``ccxt.kraken().timeframes``).
+There is NO native 10m, 3h, or 6h — requesting them directly causes an
+"Invalid arguments" error. So "10m", "3h", and "6h" are *synthetic*
+timeframes here: we fetch the nearest valid base timeframe (5m or 1h)
+and resample with pandas. See ``_SYNTHETIC_TF_MAP``.
 """
 
 from __future__ import annotations
@@ -42,22 +48,41 @@ _DEFAULT_BARS = 300
 _DEFAULT_VWAP_BARS = 96  # rolling VWAP window: 96 x 15m = 24h of "fair value"
 _INDICATOR_DISPLAY_BARS = 40  # how many recent bars to show in an indicator dump
 
-# Multi-timeframe definitions: (timeframe_label, ccxt_timeframe, bars_to_fetch)
-# Kraken doesn't support 3h natively — we fetch 1h×18 and resample.
-_MULTI_TF_SPECS: list[tuple[str, str, int]] = [
-    ("10m", "10m", 12),   # ~2h lookback — the primary / fastest
-    ("1h",  "1h",   6),   # ~6h lookback
-    ("3h",  "1h",  18),   # resampled from 1h×18 → 3h×6
-    ("6h",  "6h",  18),   # ~108h (4.5 days) lookback
+# Multi-timeframe definitions: (timeframe_label, bars_to_fetch). The label is
+# resolved to a real ccxt call (native or resampled) by fetch_intraday_ohlcv.
+_MULTI_TF_SPECS: list[tuple[str, int]] = [
+    ("10m", 12),   # ~2h lookback — the primary / fastest
+    ("1h",   6),   # ~6h lookback
+    ("3h",   6),   # ~18h lookback
+    ("6h",  18),   # ~108h (4.5 days) lookback
 ]
 
-# Kraken's charts endpoint drops often (503s, empty responses). A single failed
-# attempt used to blind the whole market analyst for the cycle ("data
-# unavailable") while the paper-sim regime filter — which retries — kept seeing
-# the same candles fine. Retry with the same backoff the simulator uses.
-_OHLCV_ATTEMPTS = 3
-_OHLCV_BASE_SLEEP = 1.0  # seconds; grows linearly per attempt (1s, 2s)
+# Kraken has no native 10m/3h/6h candles. Map each synthetic label to a
+# native base timeframe + the pandas resample rule + how many base bars make
+# one synthetic bar (used to size the base fetch with margin for warmup).
+_SYNTHETIC_TF_MAP: dict[str, tuple[str, str, int]] = {
+    "10m": ("5m", "10min", 2),
+    "3h": ("1h", "3h", 3),
+    "6h": ("1h", "6h", 6),
+}
+
+# Kraken's charts endpoint drops often (503s, empty responses), and is prone
+# to rate-limiting when the analyst issues many tool calls in one cycle. A
+# single failed attempt used to blind the whole market analyst for the cycle
+# ("data unavailable") while the paper-sim regime filter — which retries —
+# kept seeing the same candles fine. Retry with backoff, same as the simulator.
+_OHLCV_ATTEMPTS = 4
+_OHLCV_BASE_SLEEP = 2.0  # seconds; grows linearly per attempt (2s, 4s, 6s, 8s)
 _sleep = time.sleep  # indirection so tests can stub the backoff
+
+# Short-TTL cache for raw OHLCV fetches. A single analyst turn can call
+# get_stock_data, get_indicators (several times), get_verified_market_snapshot,
+# and get_sl_tp_levels — each of which used to re-fetch the same bars from
+# Kraken independently, multiplying API calls and tripping "Too many
+# requests". Bars for a given (symbol, base timeframe) don't change within a
+# few seconds, so we cache the raw ccxt response briefly and reuse it.
+_OHLCV_CACHE_TTL = 20.0  # seconds
+_ohlcv_cache: dict[tuple[str, str, int], tuple[float, list]] = {}
 
 _exchange = None  # public ccxt singleton (no API keys needed for OHLCV)
 
@@ -81,12 +106,23 @@ def _fetch_ohlcv_with_retry(symbol: str, csym: str, timeframe: str, limit: int) 
     An empty bar list counts as a failure too (Kraken occasionally returns 200
     with no data). Only after every attempt fails does this raise the typed
     ``NoMarketDataError`` that the tool layer reports as "data unavailable".
+
+    Results are cached briefly (``_OHLCV_CACHE_TTL``) per (csym, timeframe,
+    limit) so multiple tool calls within one analyst turn reuse the same
+    fetch instead of re-hitting Kraken and tripping its rate limiter.
     """
+    cache_key = (csym, timeframe, limit)
+    now = time.time()
+    cached = _ohlcv_cache.get(cache_key)
+    if cached is not None and (now - cached[0]) < _OHLCV_CACHE_TTL:
+        return cached[1]
+
     last_err: Exception | None = None
     for attempt in range(1, _OHLCV_ATTEMPTS + 1):
         try:
             raw = _get_exchange().fetch_ohlcv(csym, timeframe=timeframe, limit=limit)
             if raw:
+                _ohlcv_cache[cache_key] = (now, raw)
                 return raw
             last_err = ValueError("no intraday bars returned")
         except Exception as e:  # noqa: BLE001 - every ccxt/network error is retryable here
@@ -179,22 +215,39 @@ def _add_session_vwap(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _resample_to_3h(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample a 1h DataFrame to 3h bars."""
+def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Resample a base-timeframe OHLCV DataFrame to a coarser ``rule``
+    (e.g. "10min", "3h", "6h"), aligned to UTC midnight."""
     df = df.set_index("Date")
-    resampled = df.resample("3h", origin="start_day").agg({
+    resampled = df.resample(rule, origin="start_day").agg({
         "Open": "first",
         "High": "max",
         "Low": "min",
         "Close": "last",
         "Volume": "sum",
     }).dropna(subset=["Open"])
-    resampled = resampled.reset_index()
-    return resampled
+    return resampled.reset_index()
+
+
+def _fetch_base_df(symbol: str, ccxt_timeframe: str, limit: int) -> pd.DataFrame:
+    """Fetch a native-timeframe OHLCV DataFrame (no VWAP columns yet)."""
+    csym = _ccxt_symbol(symbol)
+    raw = _fetch_ohlcv_with_retry(symbol, csym, ccxt_timeframe, limit)
+    df = pd.DataFrame(raw, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
+    df["Date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_localize(None)
+    return df[["Date", "Open", "High", "Low", "Close", "Volume"]]
 
 
 def fetch_intraday_ohlcv(symbol: str, timeframe: str | None = None, limit: int | None = None) -> pd.DataFrame:
-    """Return a DataFrame[Date, Open, High, Low, Close, Volume] of intraday bars.
+    """Return a DataFrame[Date, Open, High, Low, Close, Volume, vwap, ...] of
+    intraday bars for ``timeframe``.
+
+    ``timeframe`` may be a native Kraken interval (1m/5m/15m/30m/1h/4h/1d/...)
+    or one of the synthetic labels "10m"/"3h"/"6h", which are resampled from
+    a native base timeframe (see ``_SYNTHETIC_TF_MAP``) since Kraken has no
+    native candle for them.
+
+    ``limit`` is the number of OUTPUT bars (post-resample) desired.
 
     Bars run up to the most recent (still-forming) one, so the latest Close is
     effectively the current price. ``Date`` is tz-naive UTC, matching the rest
@@ -202,15 +255,21 @@ def fetch_intraday_ohlcv(symbol: str, timeframe: str | None = None, limit: int |
     """
     timeframe = timeframe or _timeframe()
     limit = limit or _lookback_bars()
-    csym = _ccxt_symbol(symbol)
-    raw = _fetch_ohlcv_with_retry(symbol, csym, timeframe, limit)
 
-    df = pd.DataFrame(raw, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
-    df["Date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_localize(None)
-    df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+    if timeframe in _SYNTHETIC_TF_MAP:
+        base_tf, rule, per_bar = _SYNTHETIC_TF_MAP[timeframe]
+        # Fetch extra base bars so resampling yields at least `limit` full
+        # bins even after dropping a leading partial bin.
+        base_limit = limit * per_bar + per_bar * 2
+        base_df = _fetch_base_df(symbol, base_tf, base_limit)
+        df = _resample_ohlcv(base_df, rule)
+        df = df.tail(limit).reset_index(drop=True)
+    else:
+        df = _fetch_base_df(symbol, timeframe, limit)
+
     # VWAP is added here so every consumer (get_stock_data, get_indicators, the
     # verified snapshot) sees the same 'vwap' column with no extra plumbing.
-    df = _add_vwap(df)
+    df = _add_vwap(df, window=min(len(df), _vwap_window()) or None)
     df = _add_session_vwap(df)
     return df
 
@@ -220,26 +279,11 @@ def fetch_multi_timeframe_ohlcv(symbol: str) -> dict[str, pd.DataFrame]:
 
     Returns ``{"10m": df, "1h": df, "3h": df, "6h": df}`` where each DataFrame
     has columns [Date, Open, High, Low, Close, Volume, vwap, session_vwap, ...].
-    The 3h series is resampled from 1h bars because Kraken lacks a native 3h tf.
     """
-    csym = _ccxt_symbol(symbol)
-    result: dict[str, pd.DataFrame] = {}
-
-    for label, ccxt_tf, bars in _MULTI_TF_SPECS:
-        raw = _fetch_ohlcv_with_retry(symbol, csym, ccxt_tf, bars)
-        df = pd.DataFrame(raw, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
-        df["Date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_localize(None)
-        df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
-
-        if label == "3h":
-            df = _resample_to_3h(df)
-
-        # Add both rolling and session-anchored VWAP
-        df = _add_vwap(df, window=min(len(df), _vwap_window()))
-        df = _add_session_vwap(df)
-        result[label] = df
-
-    return result
+    return {
+        label: fetch_intraday_ohlcv(symbol, timeframe=label, limit=bars)
+        for label, bars in _MULTI_TF_SPECS
+    }
 
 
 def _format_ohlcv_csv(df: pd.DataFrame, symbol: str, label: str) -> str:
@@ -300,40 +344,25 @@ def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days=N
     else:
         ind_name, tf_override = raw_indicator, None
 
+    # Bars-per-label lookup, kept in sync with _MULTI_TF_SPECS
+    _LABEL_BARS = dict(_MULTI_TF_SPECS)
+    tf_label = tf_override or "10m"
+    limit = _LABEL_BARS.get(tf_label, 12)
+    df = fetch_intraday_ohlcv(symbol, timeframe=tf_label, limit=limit)
+
     # Session-VWAP columns are already on the DataFrame; return directly
     if ind_name.startswith("session_vwap") or ind_name.startswith("svwap_"):
-        df = fetch_intraday_ohlcv(symbol, timeframe=tf_override or "10m",
-                                  limit={"10m": 12, "1h": 6, "6h": 18}.get(tf_override, 12))
         if ind_name not in df.columns:
             raise ValueError(f"Column {ind_name} not found. "
                              f"Available session VWAP cols: session_vwap, "
                              f"svwap_1s_upper, svwap_1s_lower, svwap_2s_upper, svwap_2s_lower")
         dates = df["Date"].dt.strftime("%Y-%m-%d %H:%M").tolist()
         vals = df[ind_name].tolist()
-        tf_label = tf_override or "10m"
         pairs = list(zip(dates, vals))[-_INDICATOR_DISPLAY_BARS:]
         lines = [f"## {ind_name} on {tf_label} bars (last {len(pairs)}) for {symbol.upper()}:", ""]
         for ts, val in pairs:
             lines.append(f"{ts}: {'N/A' if pd.isna(val) else round(val, 4)}")
         return "\n".join(lines)
-
-    # Determine which timeframe to use
-    if tf_override:
-        tf_label = tf_override
-        limit_map = {"10m": 12, "1h": 6, "6h": 18}
-        limit = limit_map.get(tf_override, 12)
-        if tf_override == "3h":
-            # Fetch 1h and resample
-            df = fetch_intraday_ohlcv(symbol, timeframe="1h", limit=18)
-            df = _resample_to_3h(df)
-            df = _add_vwap(df, window=min(len(df), _vwap_window()))
-            df = _add_session_vwap(df)
-        else:
-            df = fetch_intraday_ohlcv(symbol, timeframe=tf_override, limit=limit)
-    else:
-        # Default: 10m series (primary)
-        tf_label = "10m"
-        df = fetch_intraday_ohlcv(symbol, timeframe="10m", limit=12)
 
     dates = df["Date"].dt.strftime("%Y-%m-%d %H:%M").tolist()
 

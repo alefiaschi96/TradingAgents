@@ -80,7 +80,6 @@ def get_funding_rate(
                 if r is not None:
                     entries.append((ts, r))
             rates = [e[1] for e in entries]
-
             if len(rates) >= 2:
                 avg = sum(rates) / len(rates)
                 direction = "rising" if rates[-1] > rates[0] else "falling"
@@ -110,10 +109,16 @@ def get_funding_rate(
                     f"(avg {avg * 100:.4f}%).{accel}{crowding}"
                 )
 
-                # Build individual-rate table
-                lines = ["\n| Period | Rate (%) |", "|---|---:|"]
+                # Build individual-rate table with human-readable UTC timestamps
+                lines = ["\n| Period (UTC) | Rate (%) |", "|---|---:|"]
                 for ts_val, r_val in entries:
-                    ts_str = str(ts_val)[:16] if ts_val else "?"
+                    if isinstance(ts_val, (int, float)):
+                        from datetime import datetime, timezone
+                        ts_str = datetime.fromtimestamp(
+                            ts_val / 1000, tz=timezone.utc
+                        ).strftime("%Y-%m-%d %H:%M")
+                    else:
+                        ts_str = str(ts_val)[:16] if ts_val else "?"
                     lines.append(f"| {ts_str} | {r_val * 100:.4f}% |")
                 hist_table = "\n".join(lines)
         except Exception:  # noqa: BLE001 - history is best-effort

@@ -10,7 +10,11 @@ back gracefully to free-text generation.
 
 from __future__ import annotations
 
-from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
+from tradingagents.agents.schemas import (
+    PortfolioDecision,
+    PortfolioDecisionStructural,
+    render_pm_decision,
+)
 from tradingagents.agents.utils.agent_utils import (
     get_horizon_instruction,
     get_instrument_context_from_state,
@@ -24,7 +28,14 @@ from tradingagents.agents.utils.structured import (
 
 
 def create_portfolio_manager(llm):
-    structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+    # Structural-SL flag: bind the schema variant that also demands the
+    # execution_plan stop contract. Lazy import (matches agent_utils) to keep
+    # module import free of config side effects.
+    from tradingagents.dataflows.config import get_config
+
+    structural = bool(get_config().get("structural_sl"))
+    schema = PortfolioDecisionStructural if structural else PortfolioDecision
+    structured_llm = bind_structured(llm, schema, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)

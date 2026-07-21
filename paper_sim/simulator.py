@@ -52,6 +52,141 @@ def parse_price_target(pm_decision: str) -> float | None:
     return value if value > 0 else None
 
 
+_EXEC_PLAN_RE = re.compile(
+    r"\*\*Execution Plan\*\*:\s*```json\s*(\{.*?\})\s*```", re.I | re.S
+)
+
+# Structural-SL constants (see docs/structural-sl-plan.md).
+_CONFIRM_TF = "15m"          # confirmation bar timeframe for close/hold
+_CONFIRM_SEC = 900.0
+_DEFAULT_CONFIRM_BARS = {"close": 1, "hold": 2}
+_HARD_BUFFER_ATR = 0.4       # default hard = soft + this x ATR x confirm_bars
+_HARD_ATR_RANGE = (0.2, 3.0)  # accepted hard distance, in ATRs from entry
+
+
+def parse_execution_plan(pm_decision: str) -> dict | None:
+    """The fenced-JSON stop contract rendered by ``render_pm_decision``, or None.
+
+    This is a JSON round-trip of the PM's structured output — never a prose
+    parse. Last match wins, mirroring ``parse_price_target``.
+    """
+    matches = _EXEC_PLAN_RE.findall(pm_decision or "")
+    if not matches:
+        return None
+    try:
+        plan = json.loads(matches[-1])
+    except JSONDecodeError:
+        return None
+    return plan if isinstance(plan, dict) else None
+
+
+def normalize_execution_plan(plan: dict) -> tuple[dict | None, str | None]:
+    """Cascade steps 1 and 5: typed fields and confirm_bars range. Pure.
+
+    Returns ``(normalized, None)`` or ``(None, reject_reason)``. Prices here
+    are still in the PM's (spot) geometry — the caller translates them.
+    """
+    if not isinstance(plan, dict):
+        return None, "block is not an object"
+    try:
+        soft = float(plan["invalidation_level"])
+    except (KeyError, TypeError, ValueError):
+        return None, "invalidation_level missing or not a number"
+    if soft <= 0:
+        return None, "invalidation_level not positive"
+    semantics = plan.get("invalidation_semantics")
+    if semantics not in ("touch", "close", "hold"):
+        return None, f"invalidation_semantics {semantics!r} invalid"
+    confirm = plan.get("confirm_bars")
+    if confirm is None:
+        confirm = _DEFAULT_CONFIRM_BARS.get(semantics, 1)
+    else:
+        try:
+            confirm = int(confirm)
+        except (TypeError, ValueError):
+            return None, "confirm_bars not an integer"
+        if not 1 <= confirm <= 4:
+            return None, f"confirm_bars {confirm} outside [1, 4]"
+    hard = plan.get("hard_level")
+    if hard is not None:
+        try:
+            hard = float(hard)
+        except (TypeError, ValueError):
+            return None, "hard_level not a number"
+        if hard <= 0:
+            return None, "hard_level not positive"
+    target = plan.get("price_target")
+    if target is not None:
+        try:
+            target = float(target)
+        except (TypeError, ValueError):
+            return None, "price_target not a number"
+        if target <= 0:
+            target = None
+    horizon = plan.get("horizon_minutes")
+    if horizon is not None:
+        try:
+            horizon = float(horizon)
+        except (TypeError, ValueError):
+            return None, "horizon_minutes not a number"
+        if horizon <= 0:
+            horizon = None
+    return {
+        "soft": soft,
+        "semantics": semantics,
+        "confirm_bars": confirm,
+        "hard": hard,
+        "target": target,
+        "horizon_minutes": horizon,
+    }, None
+
+
+def resolve_structural_levels(
+    norm: dict, side: str, price: float, atr: float | None
+) -> tuple[dict | None, str | None, bool]:
+    """Cascade steps 2-4: geometry against the CURRENT execution price. Pure.
+
+    All prices must already be in the same (perp) geometry. Returns
+    ``(levels, reject_reason, vetoed)``: vetoed means the thesis is already
+    invalidated at execution time — skip the trade, don't fall back.
+    """
+    soft, hard = norm["soft"], norm["hard"]
+    semantics, confirm = norm["semantics"], norm["confirm_bars"]
+    long = side == "buy"
+    # Step 2: the invalidation level must sit on the adverse side of the
+    # current price. Wrong side = price has already crossed it = born dead.
+    if (long and soft >= price) or (not long and soft <= price):
+        return None, None, True
+    if semantics == "touch":
+        hard = soft  # single stop at the declared level
+    elif hard is not None:
+        # Step 3: a declared hard must sit beyond the soft, adverse side.
+        if (long and hard >= soft) or (not long and hard <= soft):
+            return None, "hard_level not beyond invalidation_level", False
+    else:
+        if not atr or atr <= 0:
+            return None, "no ATR available for the default hard buffer", False
+        buffer = _HARD_BUFFER_ATR * atr * confirm
+        hard = soft - buffer if long else soft + buffer
+    # Step 4: hard distance from the execution price within the sane band.
+    if not atr or atr <= 0:
+        return None, "no ATR available to validate hard distance", False
+    lo, hi = _HARD_ATR_RANGE
+    dist = abs(price - hard)
+    if not lo * atr <= dist <= hi * atr:
+        return None, (
+            f"hard distance {dist:.6g} outside [{lo:g}, {hi:g}]xATR ({atr:.6g})"
+        ), False
+    return {
+        "soft": soft,
+        "hard": hard,
+        "semantics": semantics,
+        "confirm_bars": confirm,
+        "target": norm["target"],
+        "horizon_minutes": norm["horizon_minutes"],
+    }, None, False
+
+
 def capped_tp(
     side: str, entry: float, tp_rr: float, analyst_target: float | None
 ) -> tuple[float, str]:
@@ -105,6 +240,7 @@ class PaperSimulator:
         regime_persist_ticks: int = 0,
         regime_exit_check: bool = False,
         min_analyst_rr: float = 0.0,
+        structural_sl: bool = False,
     ):
         self.cfg = cfg
         self.state_path = state_path
@@ -142,6 +278,12 @@ class PaperSimulator:
         # near target used to silently cap the TP and invert the win/loss
         # asymmetry the RR bracket is designed for).
         self.min_analyst_rr = min_analyst_rr
+        # Structural SL: honour the PM's execution_plan stop contract (soft
+        # invalidation confirmed on 15m closes + hard catastrophic stop on
+        # touch) instead of the single ATR stop. Any invalid block falls back
+        # to the ATR stop — never worse than today.
+        self.structural_sl = structural_sl
+        self._spot_exchange = None  # lazy public spot client (basis ratio)
         self._pending_regime: str | None = None
         self._pending_count = 0
         # Structured per-run event stream (JSONL). No-op when unset so the
@@ -465,10 +607,12 @@ class PaperSimulator:
             self._emit_event("decision", rating=rating, side=None, action="flat")
             return
         self._emit_event("decision", rating=rating, side=side, action="open")
-        analyst_target = parse_price_target(
-            (state or {}).get("final_trade_decision", "")
+        final = (state or {}).get("final_trade_decision", "")
+        analyst_target = parse_price_target(final)
+        exec_plan = parse_execution_plan(final) if self.structural_sl else None
+        self.open_position(
+            side, rating, analyst_target=analyst_target, exec_plan=exec_plan
         )
-        self.open_position(side, rating, analyst_target=analyst_target)
 
     def _fill_price(self, price: float, fill_side: str) -> float:
         """Adverse-slippage fill for a market order: a buy fills higher, a sell
@@ -477,16 +621,125 @@ class PaperSimulator:
         slip = self.slippage / 100.0
         return price * (1.0 + slip) if fill_side == "buy" else price * (1.0 - slip)
 
+    def _spot_price(self) -> float | None:
+        """Last SPOT price for the analysis symbol (basis-ratio anchor).
+
+        The sim's Kraken client is perp-only, so this uses a tiny lazy public
+        spot client. Returns None on any failure — the caller degrades to
+        ratio 1 rather than rejecting an otherwise valid block.
+        """
+        try:
+            if self._spot_exchange is None:
+                import ccxt
+
+                self._spot_exchange = ccxt.kraken({"enableRateLimit": True})
+            pair = self.cfg.analysis_symbol.replace("-", "/")
+            ticker = self._spot_exchange.fetch_ticker(pair)
+            price = ticker.get("last") or ticker.get("close")
+            return float(price) if price else None
+        except Exception as exc:  # noqa: BLE001 - price feed, degrade gracefully
+            logger.warning("structural SL: spot price fetch failed (%s)", exc)
+            return None
+
+    def _prepare_structural(
+        self, exec_plan: dict | None, side: str, entry: float, ref_price: float
+    ) -> tuple[dict | None, bool]:
+        """Validate the PM's block and translate it into perp geometry.
+
+        Returns ``(levels, vetoed)``. ``(None, False)`` = block rejected, fall
+        back to the ATR stop; ``(None, True)`` = thesis already invalidated at
+        execution — skip the trade entirely.
+        """
+        def _reject(reason: str) -> tuple[None, bool]:
+            logger.warning(
+                "invalidation block rejected: %s — falling back to ATR stop",
+                reason,
+            )
+            self._emit_event("structural_rejected", reason=reason)
+            return None, False
+
+        if exec_plan is None:
+            return _reject("execution_plan block missing")
+        norm, err = normalize_execution_plan(exec_plan)
+        if err:
+            return _reject(err)
+        # Basis: the PM's levels were born on SPOT data, execution happens on
+        # the perp — freeze the ratio at open and translate every level.
+        ratio = 1.0
+        spot = self._spot_price()
+        if spot and spot > 0:
+            ratio = ref_price / spot
+        else:
+            logger.warning(
+                "structural SL: spot unavailable, basis ratio defaults to 1"
+            )
+        for key in ("soft", "hard", "target"):
+            if norm[key] is not None:
+                norm[key] *= ratio
+        # Contract rule: with touch semantics the declared level IS the stop;
+        # a different hard_level is ignored, not honoured and not fatal.
+        if (
+            norm["semantics"] == "touch"
+            and norm["hard"] is not None
+            and norm["hard"] != norm["soft"]
+        ):
+            logger.warning(
+                "structural SL: touch semantics — declared hard_level %.6g "
+                "ignored (the invalidation level is the stop)", norm["hard"],
+            )
+            norm["hard"] = None
+        levels, err, vetoed = resolve_structural_levels(
+            norm, side, entry, self._atr()
+        )
+        if vetoed:
+            return None, True
+        if err:
+            return _reject(err)
+        levels.update(
+            ratio=ratio,
+            count=0,
+            last_eval_bar_ts=None,
+            soft_touched=False,
+            opened_ts=time.time(),
+        )
+        return levels, False
+
     def open_position(
-        self, side: str, rating: str, analyst_target: float | None = None
+        self,
+        side: str,
+        rating: str,
+        analyst_target: float | None = None,
+        exec_plan: dict | None = None,
     ) -> None:
         ref_price = self.last_price()
         entry = self._fill_price(ref_price, side)  # market entry slips against us
         equity = self.state["equity"]
+        structural = None
+        if self.structural_sl:
+            structural, vetoed = self._prepare_structural(
+                exec_plan, side, entry, ref_price
+            )
+            if vetoed:
+                logger.info(
+                    "entry VETOED by invalidation gate: thesis already "
+                    "invalidated at execution (price %.4f vs invalidation)",
+                    entry,
+                )
+                self._emit_event("veto", gate="invalidation", entry=entry)
+                return
+            if structural is not None:
+                # The block is the single source of truth: its (translated)
+                # target replaces the prose-parsed one, even when null.
+                analyst_target = structural.pop("target")
         # SL/TP are set relative to the real (slipped) entry, like live.
         # Stop width is fixed or ATR-scaled; TP is rr x the stop distance,
         # capped at the PM's stated price target when that is nearer.
-        stop_pct = self._effective_stop_pct(entry)
+        # Structural: every downstream gate and the sizing run on the HARD
+        # distance — the worst case is what the size must price in.
+        if structural is not None:
+            stop_pct = abs(entry - structural["hard"]) / entry * 100.0
+        else:
+            stop_pct = self._effective_stop_pct(entry)
         rr = self.cfg.take_profit_rr
         cost_pct = 2.0 * (self.fee + self.slippage)  # full round trip, % of notional
         if self.min_tp_cost_mult > 0 and stop_pct * rr < self.min_tp_cost_mult * cost_pct:
@@ -528,6 +781,8 @@ class PaperSimulator:
                 "TP capped to analyst price target %.4f (rr bracket wanted %.4f)",
                 tp, tp_rr,
             )
+        if structural is not None:
+            sl = structural["hard"]  # exact declared level, no pct round-trip
         self.state["open"] = {
             "side": side,
             "rating": rating,
@@ -541,31 +796,85 @@ class PaperSimulator:
             "notional": notional,
             "opened_at": _now_iso(),
         }
+        if structural is not None:
+            self.state["open"]["structural"] = structural
+            logger.info(
+                "structural SL armed: soft %.4f (%s, %d bar/s 15m) | hard %.4f "
+                "(touch) | basis ratio %.6f",
+                structural["soft"], structural["semantics"],
+                structural["confirm_bars"], structural["hard"],
+                structural["ratio"],
+            )
         logger.info(
             "OPEN %s %s @ %.4f (ref %.4f, slip %.3f%%) size %.4f | SL %.4f TP %.4f "
             "(stop %.2f%% x rr %.1f, mode %s, tp %s) | equity %.2f",
             side, self.cfg.symbol, entry, ref_price, self.slippage, size, sl, tp,
             stop_pct, rr, self.cfg.stop_mode, tp_source, equity,
         )
+        structural_fields = (
+            {
+                "sl_mode": "structural",
+                "soft_level": structural["soft"],
+                "hard_level": structural["hard"],
+                "semantics": structural["semantics"],
+                "confirm_bars": structural["confirm_bars"],
+                "basis_ratio": structural["ratio"],
+            }
+            if structural is not None
+            else {}
+        )
         self._emit_event(
             "open", symbol=self.cfg.symbol, side=side, rating=rating, entry=entry,
             ref_price=ref_price, slip_pct=self.slippage, size=size, sl=sl, tp=tp,
             tp_source=tp_source, stop_pct=stop_pct, rr=rr, stop_mode=self.cfg.stop_mode,
-            notional=notional, equity=equity,
+            notional=notional, equity=equity, **structural_fields,
         )
 
     # ------------------------------------------------------------- monitor
     def monitor(self) -> None:
         pos = self.state["open"]
         high, low = self.minute_range()
+        # Hard stop (structural: pos["sl"] IS the hard level) and TP, on the
+        # 1m range. check_hit resolves same-candle straddles to SL first —
+        # pessimistic, per the plan's precedence rule.
         reason, exit_price = check_hit(pos["side"], pos["sl"], pos["tp"], high, low)
         if reason:
             self.close_position(exit_price, reason)
             return
-        if self.time_stop_hours > 0 and self._position_age_hours(pos) >= self.time_stop_hours:
+        st = pos.get("structural")
+        if st and st["semantics"] in ("close", "hold"):
+            # Wick beyond the soft with no exit: the old at-touch stop would
+            # have closed here. Flag once; the trade's outcome tells us later
+            # whether the save was worth it (wick-save metric).
+            wicked = (
+                low <= st["soft"] if pos["side"] == "buy" else high >= st["soft"]
+            )
+            if wicked and not st.get("soft_touched"):
+                st["soft_touched"] = True
+                logger.info(
+                    "soft touched, not confirmed: 1m range crossed %.4f — "
+                    "old stop would have exited here", st["soft"],
+                )
+                self._emit_event(
+                    "soft_touched_not_confirmed",
+                    soft_level=st["soft"], high=high, low=low,
+                )
+            if self._soft_confirmed(pos, st):
+                logger.info(
+                    "soft invalidation CONFIRMED: %d consecutive 15m close(s) "
+                    "beyond %.4f", st["count"], st["soft"],
+                )
+                self.close_position(self.last_price(), "SOFT")
+                return
+        # Time stop: a declared horizon overrides the profile default — the
+        # thesis was given ~2x its own clock to play out.
+        time_limit_h = self.time_stop_hours
+        if st and st.get("horizon_minutes"):
+            time_limit_h = st["horizon_minutes"] * 2.0 / 60.0
+        if time_limit_h > 0 and self._position_age_hours(pos) >= time_limit_h:
             logger.info(
                 "time stop: position open for %.1fh (limit %.1fh) with neither SL nor TP hit",
-                self._position_age_hours(pos), self.time_stop_hours,
+                self._position_age_hours(pos), time_limit_h,
             )
             self.close_position(self.last_price(), "TIME")
             return
@@ -585,6 +894,46 @@ class PaperSimulator:
             "monitor open %s: 1m range [%.4f, %.4f] vs SL %.4f TP %.4f",
             pos["side"], low, high, pos["sl"], pos["tp"],
         )
+
+    def _soft_confirmed(self, pos: dict, st: dict) -> bool:
+        """Advance the soft-invalidation count over every FINAL 15m bar not yet
+        evaluated; True when confirm_bars consecutive closes sit beyond the soft.
+
+        Catch-up by design: bars are keyed off ``last_eval_bar_ts``, so a
+        daemon restart or a run of failed fetches replays every bar closed in
+        the gap instead of silently skipping it. Rules (see the plan):
+        - only bars that OPEN after the position opened (the straddling bar
+          was half-written, possibly on our own entry wick);
+        - only final bars (open <= now - 15m), never the forming candle;
+        - hold at N = N *consecutive*; a close back inside resets the count.
+        """
+        now = time.time()
+        opened_ts = float(st.get("opened_ts") or 0.0)
+        last_eval = float(st.get("last_eval_bar_ts") or 0.0)
+        span_start = max(opened_ts, last_eval)
+        limit = max(4, min(500, int((now - span_start) // _CONFIRM_SEC) + 3))
+        try:
+            ohlcv = self._fetch_ohlcv(_CONFIRM_TF, limit)
+        except Exception as e:  # noqa: BLE001 - all retries exhausted
+            logger.warning(
+                "soft check: 15m fetch failed (%s); catch-up resumes next tick", e
+            )
+            return False
+        long = pos["side"] == "buy"
+        soft = st["soft"]
+        for candle in ohlcv:
+            ts = float(candle[0]) / 1000.0
+            if ts <= opened_ts or ts <= last_eval:
+                continue
+            if ts + _CONFIRM_SEC > now:
+                break  # bar still forming — finality only
+            close = float(candle[4])
+            beyond = close < soft if long else close > soft
+            st["count"] = (st.get("count") or 0) + 1 if beyond else 0
+            st["last_eval_bar_ts"] = ts
+            if st["count"] >= st["confirm_bars"]:
+                return True
+        return False
 
     @staticmethod
     def _position_age_hours(pos: dict) -> float:
@@ -629,11 +978,34 @@ class PaperSimulator:
             side, reason, exit_price, trigger_price, net, gross, fees, self.state["equity"],
             self.state["wins"], self.state["losses"],
         )
+        structural_fields = {}
+        st = pos.get("structural")
+        if st:
+            structural_fields = {
+                "sl_mode": "structural",
+                "soft_level": st.get("soft"),
+                "hard_level": st.get("hard"),
+                "semantics": st.get("semantics"),
+                "confirm_count": st.get("count"),
+                "soft_touched": bool(st.get("soft_touched")),
+                "basis_ratio": st.get("ratio"),
+            }
+            if reason == "SOFT":
+                # Insurance premium of waiting for the 15m close: systematic
+                # slippage past the declared level. Without this column the
+                # wick-save tally lies (plan §5, metric 2).
+                structural_fields["soft_delay"] = exit_price - st["soft"]
+            elif reason == "SL":
+                structural_fields["hard_delay"] = exit_price - st["hard"]
+                # Full loser: straight to the hard stop without a single soft
+                # confirmation — where the dual-track loses more than today.
+                structural_fields["hard_hit_direct"] = not st.get("count")
         self._emit_event(
             "close", symbol=self.cfg.symbol, side=side, rating=pos.get("rating"),
             outcome=reason, exit=exit_price, trigger=trigger_price, pnl=net,
             gross=gross, fees=fees, equity=self.state["equity"],
             wins=self.state["wins"], losses=self.state["losses"],
+            **structural_fields,
         )
 
     def summary(self) -> str:

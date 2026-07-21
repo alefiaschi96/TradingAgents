@@ -18,6 +18,7 @@ so that:
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from typing import Literal
 
@@ -224,7 +225,103 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    plan = getattr(decision, "execution_plan", None)
+    if plan is not None:
+        # Machine-readable stop contract (structural-SL feature). The paper
+        # simulator parses THIS fenced JSON — a round-trip of the structured
+        # output, never a prose parse. price_target is duplicated inside so
+        # the executor reads the whole contract from one block.
+        payload = {
+            "invalidation_level": plan.invalidation_level,
+            "invalidation_semantics": plan.invalidation_semantics.value,
+            "confirm_bars": plan.confirm_bars,
+            "hard_level": plan.hard_level,
+            "price_target": decision.price_target,
+            "horizon_minutes": plan.horizon_minutes,
+        }
+        parts.extend([
+            "",
+            "**Execution Plan**:",
+            "```json",
+            json.dumps(payload),
+            "```",
+        ])
     return "\n".join(parts)
+
+
+class InvalidationSemantics(str, Enum):
+    """How the PM's invalidation level triggers the exit."""
+
+    TOUCH = "touch"
+    CLOSE = "close"
+    HOLD = "hold"
+
+
+class ExecutionPlan(BaseModel):
+    """Stop contract declared by the PM (structural-SL feature).
+
+    The executor honours these fields literally — the scenario prompt tells
+    the PM exactly how each one is executed, so intent lives here instead of
+    in prose.
+    """
+
+    invalidation_level: float = Field(
+        description=(
+            "Concrete price at which the trade thesis is structurally invalid. "
+            "Give a NUMBER — freeze any dynamic anchor (VWAP/EMA/trendline) at "
+            "its current value. Pick the single decisive edge, not a zone."
+        ),
+    )
+    invalidation_semantics: InvalidationSemantics = Field(
+        description=(
+            "How the invalidation level executes: 'touch' = exit the instant "
+            "price trades through it; 'close' = exit only when a 15m bar "
+            "CLOSES beyond it; 'hold' = exit only after N consecutive 15m "
+            "closes beyond it (N = confirm_bars). Use close/hold when a wick "
+            "through the level would NOT invalidate your thesis."
+        ),
+    )
+    confirm_bars: int | None = Field(
+        default=None,
+        description=(
+            "For close/hold semantics: consecutive 15m closes beyond the "
+            "level required to confirm the invalidation (1-4). "
+            "Null = default (close: 1, hold: 2)."
+        ),
+    )
+    hard_level: float | None = Field(
+        default=None,
+        description=(
+            "Catastrophic stop, ALWAYS executed on touch, no confirmation. "
+            "Must sit beyond the invalidation level on the adverse side, "
+            "outside wick noise. This distance sizes the position and defines "
+            "the risk budget. Null = derived automatically (invalidation "
+            "level + an ATR buffer)."
+        ),
+    )
+    horizon_minutes: int | None = Field(
+        default=None,
+        description=(
+            "Expected time, in minutes, for the thesis to play out. The "
+            "position is force-closed after ~2x this horizon if neither stop "
+            "nor target has resolved it. Null = default time-stop."
+        ),
+    )
+
+
+class PortfolioDecisionStructural(PortfolioDecision):
+    """PortfolioDecision plus the mandatory structural stop contract.
+
+    Bound instead of ``PortfolioDecision`` only when the structural-SL flag is
+    active, so control-group profiles keep a byte-identical schema and prompt.
+    """
+
+    execution_plan: ExecutionPlan = Field(
+        description=(
+            "Mandatory stop contract. The executor honours it literally; "
+            "see the scenario instructions for the exact execution semantics."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

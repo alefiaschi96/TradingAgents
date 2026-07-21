@@ -104,6 +104,8 @@ def _veto_message(low: str) -> str:
         return "Operazione annullata: obiettivo troppo piccolo rispetto ai costi (commissioni)"
     if "target gate" in low:
         return "Operazione annullata: gli analisti stessi vedono poco margine di corsa"
+    if "invalidation gate" in low:
+        return "Operazione annullata: il prezzo aveva già superato il livello di invalidazione (tesi nata morta)"
     if "analyst gate" in low:
         if "no reliable" in reason:
             return "Operazione annullata: l'analista di mercato non aveva dati affidabili"
@@ -165,12 +167,20 @@ def _humanize(lines: list[str]) -> list[dict]:
             h, k = f"Aperta una scommessa su {asset} al RIALZO (punta che sale)", "open"
         elif m.startswith("CLOSE ") and "via tp" in low:
             h, k = f"Chiusa un'operazione su {asset} in GUADAGNO", "win"
+        elif m.startswith("CLOSE ") and "via soft" in low:
+            h, k = f"Chiusa un'operazione su {asset}: invalidazione confermata (chiusura 15m)", "warn"
         elif m.startswith("CLOSE ") and "via sl" in low:
             h, k = f"Chiusa un'operazione su {asset} in PERDITA", "loss"
         elif m.startswith("CLOSE ") and "via time" in low:
             h, k = f"Chiusa un'operazione su {asset} per TEMPO scaduto (non si muoveva)", "muted"
         elif m.startswith("CLOSE ") and "via regime" in low:
             h, k = f"Chiusa un'operazione su {asset} in anticipo: il mercato si è GIRATO", "warn"
+        elif "soft touched, not confirmed" in low:
+            h, k = f"Wick-save su {asset}: il prezzo ha bucato il livello ma ha tenuto — il vecchio stop avrebbe chiuso qui", "ok"
+        elif "invalidation block rejected" in low:
+            h, k = "Contratto stop del PM non valido: uso lo stop classico", "warn"
+        elif "structural sl armed" in low:
+            h, k = "Stop strutturale attivo: invalidazione su chiusure 15m + stop di protezione al tocco", "ok"
         elif "regime transition" in low:
             h, k = "Cambio di andamento appena nato: analisi anticipata", "think"
         elif "regime not ready" in low:

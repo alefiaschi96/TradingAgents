@@ -45,6 +45,7 @@ def main() -> int:
         regime_persist_ticks=int(os.environ.get("REGIME_PERSIST_TICKS", "0")),
         regime_exit_check=os.environ.get("REGIME_EXIT_CHECK", "0") == "1",
         min_analyst_rr=float(os.environ.get("MIN_ANALYST_RR", "0")),
+        structural_sl=os.environ.get("STRUCTURAL_SL", "0") == "1",
     )
     monitor_interval = float(os.environ.get("MONITOR_INTERVAL_SEC", "60"))
 

@@ -167,6 +167,23 @@ def get_scenario_instruction() -> str:
         else ""
     )
 
+    # Structural-SL: the PM declares an execution_plan stop contract and must
+    # know EXACTLY how each field executes — the whole point is moving intent
+    # out of prose into fields the executor honours literally.
+    structural_rule = (
+        " STOP CONTRACT: your execution_plan is executed exactly as declared. "
+        "'touch' exits the instant the 1-minute range trades through your "
+        "invalidation level; 'close'/'hold' exit only after your confirm_bars "
+        "consecutive 15m CLOSES beyond it — intrabar wicks do NOT trigger them. "
+        "Your hard_level always executes on touch and its distance sizes the "
+        "position (it IS your risk budget), so place it beyond wick noise. "
+        "Give concrete price levels — freeze VWAP/EMA at their current value. "
+        "If price has already crossed your invalidation level when the order "
+        "would execute, the trade is skipped entirely."
+        if config.get("structural_sl")
+        else ""
+    )
+
     scenario = (
         f" SCENARIO: you trade a crypto PERPETUAL FUTURE{instrument}{lev_txt}, "
         f"intraday on {tf} bars, holding ~1-2 hours. {direction} FLAT is the "
@@ -174,8 +191,8 @@ def get_scenario_instruction() -> str:
         f"edge — never take a position just to be active. {sizing_txt} and "
         f"bracketed by a volatility-based stop and a take-profit "
         f"at {rr_txt} the stop distance, {exit_txt}; one position "
-        f"at a time.{target_rule} Reason only from intraday price action and "
-        f"fresh catalysts."
+        f"at a time.{target_rule}{structural_rule} Reason only from intraday "
+        f"price action and fresh catalysts."
     )
 
     # Optional higher-timeframe regime read, injected as INFORMATION only. It

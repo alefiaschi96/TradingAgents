@@ -36,6 +36,7 @@ def main() -> int:
     expectancy = (pnl / n) if n else 0.0
     tp_count = sum(1 for t in closed if t.get("outcome") == "TP")
     sl_count = sum(1 for t in closed if t.get("outcome") == "SL")
+    soft_count = sum(1 for t in closed if t.get("outcome") == "SOFT")
 
     line = "=" * 60
     print(line)
@@ -44,7 +45,8 @@ def main() -> int:
     print(f" Equity:      {start_eq:.2f}  ->  {equity:.2f}   ({ret:+.2f}%)")
     print(f" Total P&L:   {pnl:+.2f}")
     print(f" Trades:      {n}   (W {wins} / L {losses}, win rate {win_rate:.0f}%)")
-    print(f" Outcomes:    TP {tp_count} / SL {sl_count}")
+    soft_txt = f" / SOFT {soft_count}" if soft_count else ""
+    print(f" Outcomes:    TP {tp_count} / SL {sl_count}{soft_txt}")
     print(f" Avg win:     {avg_win:+.2f}    Avg loss: {avg_loss:+.2f}")
     print(f" Expectancy:  {expectancy:+.2f} per trade")
     op = s.get("open")

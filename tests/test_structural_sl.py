@@ -141,6 +141,23 @@ def test_resolve_geometry_cascade():
     assert levels["hard"] == 99.0 - 0.4 * 2.0 * 2
 
 
+def test_declared_hard_gap_floor():
+    norm, _ = normalize_execution_plan(make_plan())
+    # hard glued to the invalidation (gap 0.05 < 0.25 * 2 ATR * 2 bars)
+    # -> repaired with the hard=None default buffer, original surfaced
+    glued = dict(norm, hard=98.95)
+    levels, err, _ = resolve_structural_levels(glued, "buy", 100.0, 2.0)
+    assert err is None
+    assert levels["widened_from"] == 98.95
+    assert levels["hard"] == 99.0 - 0.4 * 2.0 * 2
+    # a hard with a real buffer is honoured untouched
+    ok = dict(norm, hard=97.8)
+    levels, err, _ = resolve_structural_levels(ok, "buy", 100.0, 2.0)
+    assert err is None
+    assert levels["hard"] == 97.8
+    assert levels["widened_from"] is None
+
+
 # ---------------------------------------------------------------- entry path
 
 def test_open_arms_structural_levels(tmp_path, monkeypatch):

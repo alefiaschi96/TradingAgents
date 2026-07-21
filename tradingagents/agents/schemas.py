@@ -299,8 +299,11 @@ class ExecutionPlan(BaseModel):
             "Must sit beyond the invalidation level on the adverse side, "
             "outside wick noise. This distance sizes the position and defines "
             "the risk budget. Meaningful only with close/hold semantics — "
-            "ignored when invalidation_semantics is 'touch'. Null = derived "
-            "automatically (invalidation level + an ATR buffer)."
+            "ignored when invalidation_semantics is 'touch'. Must sit a real "
+            "buffer beyond the invalidation level (at least ~0.5 ATR); values "
+            "glued to it get widened to the automatic buffer. When in doubt "
+            "leave null = derived automatically (invalidation level + an ATR "
+            "buffer)."
         ),
     )
     horizon_minutes: int | None = Field(

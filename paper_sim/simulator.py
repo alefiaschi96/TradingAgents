@@ -62,6 +62,7 @@ _CONFIRM_SEC = 900.0
 _DEFAULT_CONFIRM_BARS = {"close": 1, "hold": 2}
 _HARD_BUFFER_ATR = 0.4       # default hard = soft + this x ATR x confirm_bars
 _HARD_ATR_RANGE = (0.2, 3.0)  # accepted hard distance, in ATRs from entry
+_HARD_GAP_FLOOR_ATR = 0.25   # min declared soft->hard gap, x ATR x confirm_bars
 
 
 def parse_execution_plan(pm_decision: str) -> dict | None:
@@ -157,12 +158,21 @@ def resolve_structural_levels(
     # current price. Wrong side = price has already crossed it = born dead.
     if (long and soft >= price) or (not long and soft <= price):
         return None, None, True
+    widened_from = None
     if semantics == "touch":
         hard = soft  # single stop at the declared level
     elif hard is not None:
         # Step 3: a declared hard must sit beyond the soft, adverse side.
         if (long and hard >= soft) or (not long and hard <= soft):
             return None, "hard_level not beyond invalidation_level", False
+        # The contract requires the hard outside wick noise: a gap under the
+        # floor leaves no room for the close confirmation to ever matter, so
+        # the field is invalid and repaired with the hard=None default buffer
+        # (same cascade policy as confirm_bars out of range — not a reject).
+        if atr and atr > 0 and abs(soft - hard) < _HARD_GAP_FLOOR_ATR * atr * confirm:
+            widened_from = hard
+            buffer = _HARD_BUFFER_ATR * atr * confirm
+            hard = soft - buffer if long else soft + buffer
     else:
         if not atr or atr <= 0:
             return None, "no ATR available for the default hard buffer", False
@@ -184,6 +194,7 @@ def resolve_structural_levels(
         "confirm_bars": confirm,
         "target": norm["target"],
         "horizon_minutes": norm["horizon_minutes"],
+        "widened_from": widened_from,
     }, None, False
 
 
@@ -702,6 +713,20 @@ class PaperSimulator:
             return None, True
         if err:
             return _reject(err)
+        widened_from = levels.pop("widened_from", None)
+        if widened_from is not None:
+            logger.warning(
+                "structural SL: declared hard %.6g glued to invalidation %.6g "
+                "(gap floor %.2gxATR) — widened to %.6g",
+                widened_from, levels["soft"], _HARD_GAP_FLOOR_ATR,
+                levels["hard"],
+            )
+            self._emit_event(
+                "structural_hard_gap_widened",
+                declared_hard=widened_from,
+                invalidation_level=levels["soft"],
+                widened_hard=levels["hard"],
+            )
         levels.update(
             ratio=ratio,
             count=0,

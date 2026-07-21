@@ -278,7 +278,10 @@ class ExecutionPlan(BaseModel):
             "price trades through it; 'close' = exit only when a 15m bar "
             "CLOSES beyond it; 'hold' = exit only after N consecutive 15m "
             "closes beyond it (N = confirm_bars). Use close/hold when a wick "
-            "through the level would NOT invalidate your thesis."
+            "through the level would NOT invalidate your thesis. With 'touch' "
+            "this level becomes the operative stop and hard_level is IGNORED "
+            "— pick 'touch' only when a mere trade-through instantly kills "
+            "the thesis."
         ),
     )
     confirm_bars: int | None = Field(
@@ -295,8 +298,9 @@ class ExecutionPlan(BaseModel):
             "Catastrophic stop, ALWAYS executed on touch, no confirmation. "
             "Must sit beyond the invalidation level on the adverse side, "
             "outside wick noise. This distance sizes the position and defines "
-            "the risk budget. Null = derived automatically (invalidation "
-            "level + an ATR buffer)."
+            "the risk budget. Meaningful only with close/hold semantics — "
+            "ignored when invalidation_semantics is 'touch'. Null = derived "
+            "automatically (invalidation level + an ATR buffer)."
         ),
     )
     horizon_minutes: int | None = Field(

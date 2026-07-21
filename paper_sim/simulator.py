@@ -687,6 +687,13 @@ class PaperSimulator:
                 "structural SL: touch semantics — declared hard_level %.6g "
                 "ignored (the invalidation level is the stop)", norm["hard"],
             )
+            # Telemetry for the A/B verdict: every occurrence is a decision
+            # where the PM de-facto disabled the soft/hard dual-track.
+            self._emit_event(
+                "structural_touch_divergent_hard",
+                invalidation_level=norm["soft"],
+                declared_hard=norm["hard"],
+            )
             norm["hard"] = None
         levels, err, vetoed = resolve_structural_levels(
             norm, side, entry, self._atr()

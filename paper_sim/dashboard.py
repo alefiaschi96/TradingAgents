@@ -289,19 +289,29 @@ def _bet(op: dict | None, lines: list[str]) -> dict | None:
         return None
     up = op.get("side") == "buy"
     entry, sl, tp = float(op.get("entry", 0)), float(op.get("sl", 0)), float(op.get("tp", 0))
+    st = op.get("structural") or {}
+    soft = st.get("soft")
+    soft = float(soft) if soft is not None and float(soft) != sl else None
     now = _current_price(lines)
     winning = None if now is None else (now > entry if up else now < entry)
     asset = _asset_name()
+    plain = (
+        f"Ha {'comprato' if up else 'venduto'} a {_fmt_price(entry)}. "
+        f"Chiude in GUADAGNO se {asset} {'sale' if up else 'scende'} a {_fmt_price(tp)}; "
+        f"in PERDITA se {'scende' if up else 'sale'} a {_fmt_price(sl)}."
+    )
+    if soft is not None:
+        plain += (
+            f" Stop in due livelli: esce già se una candela 15m chiude oltre "
+            f"{_fmt_price(soft)} (stop morbido)."
+        )
     return {
         "up": up,
         "dir_h": f"Punta che {asset} SALE" if up else f"Punta che {asset} SCENDE",
-        "entry": entry, "stop": sl, "target": tp, "now": now, "winning": winning,
+        "entry": entry, "stop": sl, "soft": soft, "target": tp, "now": now,
+        "winning": winning,
         "path": _price_path(lines, entry),
-        "plain": (
-            f"Ha {'comprato' if up else 'venduto'} a {_fmt_price(entry)}. "
-            f"Chiude in GUADAGNO se {asset} {'sale' if up else 'scende'} a {_fmt_price(tp)}; "
-            f"in PERDITA se {'scende' if up else 'sale'} a {_fmt_price(sl)}."
-        ),
+        "plain": plain,
     }
 
 
@@ -499,7 +509,7 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
  background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(0,0,0,.12))}
 .lab{position:absolute;right:5px;transform:translateY(-50%);font-size:10.5px;font-weight:700;
  background:rgba(7,11,18,.74);padding:1px 6px;border-radius:6px;pointer-events:none;white-space:nowrap}
-.lab.tp{color:var(--green)}.lab.sl{color:var(--red)}.lab.now{color:#fff}
+.lab.tp{color:var(--green)}.lab.sl{color:var(--red)}.lab.soft{color:#fbbf24}.lab.now{color:#fff}
 
 /* panels (right column) */
 .panel{display:flex;flex-direction:column;min-height:0;padding:12px 15px}
@@ -579,7 +589,7 @@ function spark(pts){if(!pts||pts.length<2)return"";
 function frac(b,price){return clamp(b.up?(price-b.stop)/(b.target-b.stop):(b.stop-price)/(b.stop-b.target));}
 function chart(b){
  const pts=(b.path&&b.path.length)?b.path:[b.entry];
- const vals=pts.concat([b.stop,b.target,b.entry]);
+ const vals=pts.concat([b.stop,b.target,b.entry]).concat(b.soft!=null?[b.soft]:[]);
  let lo=Math.min(...vals),hi=Math.max(...vals);const pad=(hi-lo)*0.10||1;lo-=pad;hi+=pad;
  const Y=v=>(100*(1-(v-lo)/(hi-lo)));
  const X=i=>(pts.length<2?0:100*i/(pts.length-1));
@@ -589,11 +599,12 @@ function chart(b){
  const col=b.up?'#34d399':'#fb7185';
  const svg=`<svg class="chart" viewBox="0 0 100 100" preserveAspectRatio="none">
    <polygon points="${area}" fill="${col}" opacity=".07"/>
-   ${hl(b.target,'#34d399','4 3')}${hl(b.stop,'#fb7185','4 3')}${hl(b.entry,'#7b8aa0','2 4')}
+   ${hl(b.target,'#34d399','4 3')}${hl(b.stop,'#fb7185','4 3')}${b.soft!=null?hl(b.soft,'#fbbf24','2 3'):''}${hl(b.entry,'#7b8aa0','2 4')}
    <polyline points="${line}" fill="none" stroke="#dbe6f5" stroke-width="2" vector-effect="non-scaling-stroke"/>
   </svg>`;
  const labs=`<div class="lab tp" style="top:${Y(b.target).toFixed(1)}%">🎯 obiettivo ${fp(b.target)}</div>
-   <div class="lab sl" style="top:${Y(b.stop).toFixed(1)}%">🛑 stop ${fp(b.stop)}</div>`+
+   <div class="lab sl" style="top:${Y(b.stop).toFixed(1)}%">🛑 ${b.soft!=null?'stop duro':'stop'} ${fp(b.stop)}</div>`+
+   (b.soft!=null?`<div class="lab soft" style="top:${Y(b.soft).toFixed(1)}%">⚠️ stop morbido ${fp(b.soft)}</div>`:'')+
    (b.now!=null?`<div class="lab now" style="top:${Y(b.now).toFixed(1)}%;color:${b.winning?'#34d399':b.winning===false?'#fb7185':'#fff'}">ora ${fp(b.now)}${b.winning==null?'':b.winning?' ✓':' ✕'}</div>`:'');
  return svg+labs;
 }

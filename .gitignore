@@ -221,3 +221,8 @@ __marimo__/
 # Enterprise env file (secrets) and generated run reports
 .env.enterprise
 reports/
+
+# Secrets and local run artifacts (never commit)
+.env.live
+.env.*.local
+logs/

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
+    get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_scenario_instruction,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
@@ -61,7 +63,9 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
+**Entry Plan** (the `entry_legs` field): the executor can rest your entry as conditional orders instead of filling at the current price. When the research plan or your own thesis conditions the entry — a pullback into support/resistance expected to hold, or a breakout that needs acceptance beyond a level — transcribe those conditions into `entry_legs` using concrete levels from the analysts' evidence (zone bounds or trigger, plus each leg's own price target and invalidation), consistent with the rating's direction. Omit `entry_legs` only for Hold, or when entering immediately at the current price is genuinely what you intend.
+
+Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}{get_horizon_instruction()}{get_scenario_instruction()}"""
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,

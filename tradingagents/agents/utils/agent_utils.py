@@ -43,6 +43,8 @@ __all__ = [
     "resolve_instrument_identity",
     "get_instrument_context_from_state",
     "get_language_instruction",
+    "get_horizon_instruction",
+    "get_scenario_instruction",
     "create_msg_delete",
 ]
 
@@ -63,6 +65,122 @@ def get_language_instruction() -> str:
     if lang.strip().lower() == "english":
         return ""
     return f" Write your entire response in {lang}."
+
+
+def get_horizon_instruction() -> str:
+    """Return a prompt directive that pins the trade horizon.
+
+    In intraday mode (config ``intraday``) it forces every agent to reason for a
+    position held over the next 1-2 hours on intraday bars, and away from
+    fundamentals / multi-day theses. Returns empty string in daily mode so the
+    default behavior is unchanged. Applied to researchers, debaters, research
+    manager, trader, and portfolio manager.
+    """
+    from tradingagents.dataflows.config import get_config
+    config = get_config()
+    if not config.get("intraday"):
+        return ""
+    tf = config.get("intraday_timeframe", "15m")
+    return (
+        f" HORIZON: This is an INTRADAY trade. Evaluate strictly for a position "
+        f"held over the next 1-2 hours on {tf} bars. Ground every conclusion in "
+        f"intraday price action — momentum, trend (EMA/VWAP), key intraday "
+        f"levels, breakout vs mean-reversion, and volatility (ATR) for stops. Do "
+        f"NOT reason from fundamentals, valuation, earnings, revenue, scalability "
+        f"or multi-day/multi-week theses; they are irrelevant on this horizon. It "
+        f"is a short-term trade, not an investment."
+    )
+
+
+def get_scenario_instruction() -> str:
+    """Return a prompt directive describing the concrete trading scenario.
+
+    In intraday mode (config ``intraday``) it spells out the mechanics the agents
+    are actually trading: a crypto perpetual future, the configured leverage,
+    that LONG / SHORT / FLAT are all available with FLAT as the default, and how
+    each position is sized and bracketed by an automatic stop and take-profit.
+    With ``entry_mode`` = "plan" it also declares the conditional-entry
+    executor: the Portfolio Manager's entry legs rest as OCO orders instead of
+    an immediate market fill. The text is built dynamically from the live
+    config so it always matches the deployed instrument and risk settings, and
+    it prescribes NO strategy. Returns empty string in daily mode so the
+    default behavior is unchanged.
+    """
+    from tradingagents.dataflows.config import get_config
+    config = get_config()
+    if not config.get("intraday"):
+        return ""
+
+    symbol = config.get("symbol") or config.get("analysis_symbol")
+    instrument = f" ({symbol})" if symbol else ""
+
+    leverage = config.get("leverage")
+    try:
+        lev_txt = f" at {leverage:g}x leverage" if leverage else ""
+    except (TypeError, ValueError):
+        lev_txt = ""
+
+    rr = config.get("take_profit_rr")
+    try:
+        rr_txt = f"~{rr:g}x" if rr else "a multiple of"
+    except (TypeError, ValueError):
+        rr_txt = "a multiple of"
+
+    tf = config.get("intraday_timeframe", "15m")
+
+    if config.get("allow_short", True):
+        direction = (
+            "You may take a LONG or a SHORT with equal ease, or stay FLAT."
+        )
+    else:
+        direction = "You may take a LONG, or stay FLAT (shorts are disabled)."
+
+    scenario = (
+        f" SCENARIO: you trade a crypto PERPETUAL FUTURE{instrument}{lev_txt}, "
+        f"intraday on {tf} bars, holding ~1-2 hours. {direction} FLAT is the "
+        f"default and the correct choice whenever there is no clear directional "
+        f"edge — never take a position just to be active. Each position is sized "
+        f"automatically and bracketed by a volatility-based stop and a take-profit "
+        f"at {rr_txt} the stop distance, then left until one is hit; one position "
+        f"at a time. Reason only from intraday price action and fresh catalysts. "
+        f"The market report may include futures positioning (funding rate, open "
+        f"interest, order-book imbalance): read extreme funding as crowding/"
+        f"squeeze risk against the crowded side, rising open interest as fresh "
+        f"money behind a move (falling OI = a move that may fade), and a "
+        f"bid/ask-skewed book as short-lived near-term pressure. When any of "
+        f"these reads 'data unavailable', weigh the missing confirmation "
+        f"explicitly instead of assuming it."
+    )
+
+    if str(config.get("entry_mode", "")).lower() == "plan":
+        scenario += (
+            " ENTRY EXECUTION: the desk does NOT have to enter at the current "
+            "price. The Portfolio Manager's entry plan is executed as resting "
+            "conditional orders (OCO): a limit inside a pullback zone and/or a "
+            "stop-entry beyond a breakout level — the first to trigger opens "
+            "the position, the other is cancelled, and the plan expires if "
+            "neither triggers. Conditioning the entry on a level is therefore "
+            "actionable, not just advice; only an omitted entry plan means an "
+            "immediate market fill. Every level you name is executed on TOUCH, "
+            "wicks included: entries fire and stops close the trade the instant "
+            "price prints there, with no wait for a confirmed close. When your "
+            "reasoning is in terms of 'reclaims and HOLDS above X' or 'accepts "
+            "below X', the level to quote is NOT X itself but a level past it "
+            "with room for noise — a stop sitting exactly on X gets taken out "
+            "by a wick that never confirms your invalidation."
+        )
+
+    # Optional higher-timeframe regime read, injected as INFORMATION only. It
+    # prescribes nothing and vetoes nothing — the agent decides what to make of
+    # it. Empty when unavailable (fail-open).
+    regime_context = config.get("regime_context", "")
+    if regime_context:
+        scenario += (
+            f" CURRENT REGIME (informational, you decide what to do with it): "
+            f"{regime_context}"
+        )
+
+    return scenario
 
 
 def _clean_identity_value(value: Any) -> str | None:

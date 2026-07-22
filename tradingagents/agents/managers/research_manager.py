@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.utils.agent_utils import (
+    get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_scenario_instruction,
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
@@ -40,7 +42,7 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
 ---
 
 **Debate History:**
-{history}""" + get_language_instruction()
+{history}""" + get_language_instruction() + get_horizon_instruction() + get_scenario_instruction()
 
         investment_plan = invoke_structured_or_freetext(
             structured_llm,

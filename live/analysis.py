@@ -128,6 +128,15 @@ def build_config(cfg) -> dict:
         config["symbol"] = cfg.symbol
         config["analysis_symbol"] = cfg.analysis_symbol
         config["stop_mode"] = cfg.stop_mode
+        # "plan" tells the agents (via get_scenario_instruction) that the
+        # PM's entry legs rest as conditional OCO orders instead of an
+        # immediate market fill.
+        config["entry_mode"] = cfg.entry_mode
+        # Conditional-hold pass: a HOLD naming a nearby trigger level may
+        # continue to the debate/PM instead of short-circuiting (the level
+        # must sit within conditional_max_atr ATRs of price).
+        config["conditional_holds"] = cfg.conditional_holds
+        config["conditional_max_atr"] = cfg.conditional_max_atr
         # Placeholder; run_analysis fills this with the live regime read just
         # before building the graph (kept here so the key always exists).
         config["regime_context"] = ""

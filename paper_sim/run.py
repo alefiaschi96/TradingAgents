@@ -1,8 +1,10 @@
 """Paper-sim daemon.
 
 Loop: every MONITOR_INTERVAL_SEC check the open position's SL/TP against the
-live 1m candle; when flat and DECISION_INTERVAL_MIN has elapsed, run the
-analysis and (maybe) open a simulated position. One position at a time.
+live 1m candle; when there are pending conditional entries (ENTRY_MODE=plan),
+watch the tape for a leg to fill or the plan to expire; when flat and
+DECISION_INTERVAL_MIN has elapsed, run the analysis and (maybe) open or park
+a simulated position. One position (or one pending plan) at a time.
 
 Run:  python -m paper_sim.run     (needs GOOGLE_API_KEY; prices are public)
 Stop: Ctrl-C. State persists, so it resumes where it left off.
@@ -54,6 +56,8 @@ def main() -> int:
             now = time.time()
             if sim.has_open():
                 sim.monitor()
+            elif sim.has_pending():
+                sim.check_pending(now)
             elif sim.should_decide(now):
                 log.info("setup detected (flat) — running analysis, this takes a few minutes...")
                 sim.maybe_decide(now)

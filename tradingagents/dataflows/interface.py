@@ -12,14 +12,20 @@ from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
 )
 from .config import get_config
+from .crypto_intraday import (
+    get_indicators as get_kraken_indicators,
+    get_stock_data as get_kraken_stock_data,
+)
 from .errors import (
     NoMarketDataError,
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
-from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
-from .polymarket import get_prediction_markets_disabled
+from .polymarket import (
+    get_prediction_markets as get_polymarket_prediction_markets,
+    get_prediction_markets_disabled,
+)
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -91,11 +97,13 @@ VENDOR_METHODS = {
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
+        "kraken": get_kraken_stock_data,
     },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "kraken": get_kraken_indicators,
     },
     # fundamental_data
     "get_fundamentals": {

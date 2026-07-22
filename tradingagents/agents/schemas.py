@@ -167,6 +167,86 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
 # ---------------------------------------------------------------------------
 
 
+class EntryLeg(BaseModel):
+    """One conditional entry scenario inside the Portfolio Manager's plan.
+
+    Two kinds exist: a *pullback* leg (limit entry inside a retracement zone
+    that is expected to hold) and a *breakout* leg (stop entry once price
+    accepts beyond a level).  Legs are executed OCO — the first one whose
+    condition triggers becomes the position and the other is cancelled — so
+    each leg carries its own target and invalidation for its own scenario.
+    """
+
+    kind: Literal["pullback", "breakout"] = Field(
+        description=(
+            "'pullback' = enter on a retracement into a support/resistance "
+            "zone expected to hold; 'breakout' = enter once price breaks and "
+            "accepts beyond a trigger level."
+        ),
+    )
+    zone_low: float | None = Field(
+        default=None,
+        description=(
+            "Pullback legs only: lower bound of the entry zone in the "
+            "instrument's quote currency (e.g. the 1837 of a 1837-1840 zone). "
+            "Omit for breakout legs."
+        ),
+    )
+    zone_high: float | None = Field(
+        default=None,
+        description=(
+            "Pullback legs only: upper bound of the entry zone. "
+            "Omit for breakout legs."
+        ),
+    )
+    trigger: float | None = Field(
+        default=None,
+        description=(
+            "Breakout legs only: the level whose break triggers the entry "
+            "(above current price for a long, below for a short). "
+            "EXECUTION: this is a stop-entry that fires the instant price "
+            "TOUCHES it — a single wick is enough, there is no wait for a "
+            "confirmed close. So if your thesis needs acceptance beyond a "
+            "level, place the trigger past that level by a noise margin "
+            "(a fraction of ATR) instead of exactly on it. "
+            "Omit for pullback legs."
+        ),
+    )
+    price_target: float | None = Field(
+        default=None,
+        description=(
+            "Target price for THIS entry scenario. It MUST be realistically "
+            "reachable within the decision's stated time_horizon: on an "
+            "intraday 1-2 hour horizon that means the FIRST support/"
+            "resistance level ahead, typically within ~1-2 ATR of the entry "
+            "— never a multi-day swing target. For a breakout entry, the "
+            "measured extension just beyond the broken level. Omit the field "
+            "when no sensible near target exists; execution then falls back "
+            "to the decision's overall price_target and the mechanical "
+            "bracket."
+        ),
+    )
+    invalidation: float | None = Field(
+        default=None,
+        description=(
+            "Price level that voids this scenario BEFORE entry (the pending "
+            "order is cancelled if it trades there first) and, AFTER entry, "
+            "becomes the position's actual STOP-LOSS. Below the entry for a "
+            "long, above for a short. EXECUTION: the stop is a market order "
+            "that fires the instant price TOUCHES this level — one wick ends "
+            "the trade, there is no wait for a confirmed close. So when your "
+            "thesis is 'invalid if price reclaims and HOLDS above X', do NOT "
+            "put X here: place the level beyond X with room for noise "
+            "(typically a fraction of ATR past it), otherwise a wick that "
+            "never confirms will close the position. Give each leg the "
+            "invalidation that fits ITS entry — a breakout leg is not "
+            "automatically invalidated closer than a pullback leg. Widening "
+            "the stop costs nothing in risk: position size is scaled down "
+            "proportionally so the loss at the stop stays the same."
+        ),
+    )
+
+
 class PortfolioDecision(BaseModel):
     """Structured output produced by the Portfolio Manager.
 
@@ -197,12 +277,47 @@ class PortfolioDecision(BaseModel):
     )
     price_target: float | None = Field(
         default=None,
-        description="Optional target price in the instrument's quote currency.",
+        description=(
+            "Optional target price in the instrument's quote currency. Must "
+            "be realistically reachable within the stated time_horizon."
+        ),
     )
     time_horizon: str | None = Field(
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    entry_legs: list[EntryLeg] | None = Field(
+        default=None,
+        description=(
+            "Conditional entry plan for actionable ratings (skip for Hold). "
+            "Up to two OCO legs — at most one pullback and one breakout — "
+            "expressing WHERE the position should be entered rather than "
+            "entering at market. Give each leg concrete price levels taken "
+            "from the analysis (zone bounds / trigger, its own target, its "
+            "invalidation). Omit entirely only when an immediate market "
+            "entry at the current price is genuinely the intended execution."
+        ),
+    )
+
+
+def render_entry_leg(leg: EntryLeg) -> str:
+    """One deterministic ``- kind | ... `` line for an entry leg.
+
+    The exact format is an interchange contract: the paper-sim's
+    ``parse_entry_plan`` reads these lines back out of the rendered markdown,
+    so keep field labels and separators stable.
+    """
+    chunks = [leg.kind]
+    if leg.kind == "pullback" and leg.zone_low is not None and leg.zone_high is not None:
+        lo, hi = sorted((leg.zone_low, leg.zone_high))
+        chunks.append(f"zone {lo}-{hi}")
+    if leg.kind == "breakout" and leg.trigger is not None:
+        chunks.append(f"trigger {leg.trigger}")
+    if leg.price_target is not None:
+        chunks.append(f"target {leg.price_target}")
+    if leg.invalidation is not None:
+        chunks.append(f"invalidation {leg.invalidation}")
+    return "- " + " | ".join(chunks)
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:
@@ -211,7 +326,9 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     Memory log, CLI display, and saved report files all read this markdown,
     so the rendered output preserves the exact section headers (``**Rating**``,
     ``**Executive Summary**``, ``**Investment Thesis**``) that downstream
-    parsers and the report writers already handle.
+    parsers and the report writers already handle. The ``**Entry Plan**``
+    block renders each conditional entry leg via :func:`render_entry_leg` in
+    a deterministic shape the paper-sim parses back.
     """
     parts = [
         f"**Rating**: {decision.rating.value}",
@@ -224,6 +341,9 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.entry_legs:
+        parts.extend(["", "**Entry Plan**:"])
+        parts.extend(render_entry_leg(leg) for leg in decision.entry_legs)
     return "\n".join(parts)
 
 

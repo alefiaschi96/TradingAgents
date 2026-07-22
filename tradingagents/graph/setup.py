@@ -22,7 +22,10 @@ from tradingagents.agents import (
     create_trader,
 )
 from tradingagents.agents.utils.agent_states import AgentState
-from tradingagents.agents.utils.market_lean import market_gate_shortcut_reason
+from tradingagents.agents.utils.market_lean import (
+    conditional_trigger_levels,
+    market_gate_shortcut_reason,
+)
 from tradingagents.dataflows.config import get_config
 
 from .analyst_execution import build_analyst_execution_plan
@@ -58,6 +61,69 @@ def _market_gate_hold_node(state):
     return {"final_trade_decision": text}
 
 
+def _intraday_price_atr(config) -> tuple[float, float]:
+    """Last close + 14-bar ATR from the same intraday bars the analyst sees."""
+    if not config.get("intraday"):
+        raise ValueError("intraday mode off: no intraday price/ATR")
+    import pandas as pd
+
+    from tradingagents.dataflows.crypto_intraday import fetch_intraday_ohlcv
+
+    symbol = config.get("analysis_symbol") or config.get("symbol")
+    df = fetch_intraday_ohlcv(symbol, limit=20)
+    prev = df["Close"].shift(1)
+    tr = pd.concat(
+        [df["High"] - df["Low"], (df["High"] - prev).abs(), (df["Low"] - prev).abs()],
+        axis=1,
+    ).max(axis=1)
+    return float(df["Close"].iloc[-1]), float(tr.tail(14).mean())
+
+
+def _conditional_pass_allows(report: str) -> bool:
+    """Should a HOLD report skip the short-circuit because it names a
+    NEARBY conditional trigger?
+
+    Under the conditional-entry executor, "avoid longs unless price reclaims
+    X" is an actionable plan, not a no-trade: letting the pipeline continue
+    gives the PM the chance to park it as an entry leg. The pass is opt-in
+    (``conditional_holds``), requires an explicit level in the report, and a
+    mechanical distance filter keeps it honest: the level must sit within
+    ``conditional_max_atr`` ATRs of the current price, so a swing-level
+    daydream can't burn a full pipeline run. Any data failure gates as
+    usual (fail closed): the pass is an opportunity, never a dependency.
+    """
+    config = get_config()
+    if not config.get("conditional_holds"):
+        return False
+    levels = conditional_trigger_levels(report)
+    if not levels:
+        return False
+    try:
+        price, atr = _intraday_price_atr(config)
+    except Exception as e:  # noqa: BLE001 - opportunistic: gate as usual
+        logger.warning(
+            "conditional-hold check: price/ATR unavailable (%s); short-circuit stands", e
+        )
+        return False
+    if not price or not atr or atr <= 0:
+        return False
+    mult = float(config.get("conditional_max_atr", 2.0) or 2.0)
+    near = [lv for lv in levels if abs(lv - price) <= mult * atr]
+    if near:
+        logger.info(
+            "market gate: HOLD names trigger %.4f within %.1f ATR of price %.4f — "
+            "conditional-hold pass, pipeline continues",
+            near[0], mult, price,
+        )
+        return True
+    logger.info(
+        "market gate: HOLD trigger(s) %s all beyond %.1f ATR of price %.4f — "
+        "short-circuit stands",
+        [round(lv, 4) for lv in levels], mult, price,
+    )
+    return False
+
+
 def _market_gate_router(next_node: str):
     """Route to the early Hold exit when enabled and the report backs no trade.
 
@@ -65,13 +131,18 @@ def _market_gate_router(next_node: str):
     ``TradingAgentsGraph.__init__`` via ``set_config``), so the same compiled
     graph honours whatever the current run configured. Off (or an empty
     report) falls through to the normal pipeline — fail open, like the
-    end-of-run analyst gate.
+    end-of-run analyst gate. A HOLD that names a nearby conditional trigger
+    may also fall through when ``conditional_holds`` is enabled (see
+    ``_conditional_pass_allows``).
     """
 
     def route(state) -> str:
         if not get_config().get("market_gate_short_circuit"):
             return next_node
-        if market_gate_shortcut_reason(state.get("market_report", "")) is None:
+        report = state.get("market_report", "")
+        if market_gate_shortcut_reason(report) is None:
+            return next_node
+        if _conditional_pass_allows(report):
             return next_node
         return MARKET_GATE_NODE
 

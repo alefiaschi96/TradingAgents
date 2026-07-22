@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -44,7 +45,9 @@ _KEY = (
     "paper-sim started", "regime ready", "regime not ready", "setup detected",
     "Analysis decision for", "VETOED", "regime gate OK", "no entry",
     "OPEN PF", "CLOSE ", "exceeded", "loop error", "market gate short-circuit",
-    "regime transition",
+    "regime transition", "PENDING", "market entry", "SL widened",
+    "same-candle flush", "PROFIT LOCK", "conditional-hold pass",
+    "short-circuit stands",
 )
 
 
@@ -134,16 +137,40 @@ def _humanize(lines: list[str]) -> list[dict]:
             h, k = _veto_message(low), "veto"
         elif "regime gate ok" in low:
             h, k = "operazione approvata", "ok"
+        elif "pending filled (pullback)" in low:
+            h, k = "Prezzo arrivato nella zona: ingresso sul RITRACCIAMENTO", "open"
+        elif "pending filled (breakout)" in low:
+            h, k = "Livello rotto: ingresso sulla ROTTURA", "open"
+        elif "pending expired" in low:
+            h, k = "Ordini in attesa SCADUTI: il prezzo non è mai arrivato ai livelli", "muted"
+        elif m.startswith("PENDING sell"):
+            h, k = "Ordini piazzati: VENDERÀ solo se il prezzo arriva ai livelli scelti", "pend"
+        elif m.startswith("PENDING buy"):
+            h, k = "Ordini piazzati: COMPRERÀ solo se il prezzo arriva ai livelli scelti", "pend"
+        elif "same-candle flush" in low:
+            h, k = "Il minuto dell'ingresso ha subito toccato lo stop: aperta e chiusa", "warn"
+        elif "sl widened" in low:
+            h, k = "Stop allargato al livello di sicurezza del piano (puntata ridotta)", "muted"
+        elif "market entry" in low:
+            h, k = "Il PM non ha dato livelli d'ingresso: entra subito a mercato", "muted"
         elif "no entry" in low:
             h, k = "nessuna mossa, resta fermo", "muted"
         elif m.startswith("OPEN ") and " sell " in (" " + low + " "):
             h, k = "Aperta una scommessa al RIBASSO (punta che scende)", "open"
         elif m.startswith("OPEN "):
             h, k = "Aperta una scommessa al RIALZO (punta che sale)", "open"
+        elif m.startswith("CLOSE ") and "via lock" in low:
+            h, k = "Chiusa in GUADAGNO sul ritorno: profitto incassato (blocco)", "win"
         elif m.startswith("CLOSE ") and "via tp" in low:
             h, k = "Chiusa un'operazione in GUADAGNO", "win"
         elif m.startswith("CLOSE ") and "via sl" in low:
             h, k = "Chiusa un'operazione in PERDITA", "loss"
+        elif "profit lock armed" in low:
+            h, k = "Quasi all'obiettivo: profitto BLOCCATO, non può più tornare in perdita", "ok"
+        elif "conditional-hold pass" in low:
+            h, k = "L'analista aspetta un livello VICINO: la squadra valuta un ordine in attesa", "think"
+        elif "short-circuit stands" in low:
+            h, k = "L'analista aspetta un livello ma è LONTANO: si resta fermi", "muted"
         elif "regime transition" in low:
             h, k = "Cambio di andamento appena nato: analisi anticipata", "think"
         elif "regime not ready" in low:
@@ -165,7 +192,7 @@ def _humanize(lines: list[str]) -> list[dict]:
 
 def _current_price(lines: list[str]) -> float | None:
     for ln in reversed(lines):
-        if "monitor open" in ln and "[" in ln and "]" in ln:
+        if ("monitor open" in ln or "pending watch" in ln) and "[" in ln and "]" in ln:
             try:
                 a, b = (float(x) for x in ln[ln.index("[") + 1: ln.index("]")].split(","))
                 return (a + b) / 2.0
@@ -192,6 +219,112 @@ def _price_path(lines: list[str], entry: float) -> list[float]:
     return pts[-120:]
 
 
+def _pending_path(lines: list[str], first: float | None) -> list[float]:
+    """Price path while waiting: the mid of each 1m 'pending watch' candle
+    logged since the pending plan was placed. Same idea as _price_path."""
+    start = 0
+    for i, ln in enumerate(lines):
+        if "PENDING buy" in ln or "PENDING sell" in ln:
+            start = i
+    pts = [first] if first else []
+    for ln in lines[start:]:
+        if "pending watch" in ln and "[" in ln and "]" in ln:
+            try:
+                a, b = (float(x) for x in ln[ln.index("[") + 1: ln.index("]")].split(","))
+                pts.append((a + b) / 2.0)
+            except (ValueError, IndexError):
+                pass
+    return pts[-120:]
+
+
+def _pending(p: dict | None, lines: list[str]) -> dict | None:
+    """Full view of the pending conditional entry plan (OCO legs): the levels
+    to draw, one detail row per leg (order type, levels, target, invalidation),
+    placement metadata, the epoch expiry for the client-side countdown, and one
+    Italian sentence saying exactly what the bot is waiting for."""
+    if not p:
+        return None
+    up = p.get("side") == "buy"
+    verb = "compra" if up else "vende"
+    levels: list[dict] = []
+    waits: list[str] = []
+    leg_rows: list[dict] = []
+    for leg in p.get("legs") or []:
+        target, inval = leg.get("target"), leg.get("invalidation")
+        if leg.get("kind") == "pullback":
+            lo, hi = leg.get("zone_low"), leg.get("zone_high")
+            edge = hi if up else lo
+            if edge is not None:
+                levels.append({"v": edge, "k": "entry", "lab": f"zona {lo:.2f}–{hi:.2f}"})
+            waits.append(
+                f"{'scende' if up else 'sale'} nella zona {lo:.2f}–{hi:.2f} (ritracciamento)"
+            )
+            head = (
+                f"ordine limit: {verb} a {edge:.2f} se il prezzo "
+                f"{'scende' if up else 'sale'} nella zona {lo:.2f}–{hi:.2f}"
+            )
+            row = {"k": "pull", "name": "Ritracciamento", "head": head}
+        else:
+            trg = leg.get("trigger")
+            if trg is not None:
+                levels.append({"v": trg, "k": "entry", "lab": f"rottura {trg:.2f}"})
+            waits.append(f"{'supera' if up else 'buca'} {trg:.2f} (rottura)")
+            head = (
+                f"ordine stop-entry: {verb} a mercato se il prezzo "
+                f"{'supera' if up else 'buca'} {trg:.2f}"
+            )
+            row = {"k": "brk", "name": "Rottura", "head": head}
+        if target is not None:
+            levels.append({"v": target, "k": "target", "lab": f"obiettivo {target:.2f}"})
+            row["target"] = f"obiettivo {target:.2f}"
+        if inval is not None:
+            row["inval"] = f"annulla {'sotto' if up else 'sopra'} {inval:.2f}"
+            if leg.get("kind") == "pullback":
+                levels.append({"v": inval, "k": "inval", "lab": f"stop piano {inval:.2f}"})
+        leg_rows.append(row)
+    left_min = None
+    expires = p.get("expires_ts")
+    if isinstance(expires, (int, float)):
+        left_min = max(0.0, (float(expires) - time.time()) / 60.0)
+    plain = (
+        f"{'Comprerà' if up else 'Venderà'} SOLO se il prezzo "
+        + " oppure se ".join(waits) + "."
+    )
+    if left_min is not None:
+        plain += f" Se non succede entro {left_min:.0f} min, annulla tutto e rianalizza."
+    # Placement metadata: when the plan was parked, at what price, until when.
+    created_hm = expires_hm = None
+    try:
+        created_hm = datetime.fromisoformat(str(p.get("created_at"))).astimezone().strftime("%H:%M")
+    except (TypeError, ValueError):
+        pass
+    if isinstance(expires, (int, float)):
+        expires_hm = datetime.fromtimestamp(float(expires)).strftime("%H:%M")
+    ref = p.get("ref_price")
+    meta_bits = []
+    if created_hm:
+        meta_bits.append(f"piazzati alle {created_hm}")
+    if isinstance(ref, (int, float)):
+        meta_bits.append(f"prezzo al piazzamento {ref:.2f}")
+    if expires_hm:
+        meta_bits.append(f"validi fino alle {expires_hm}")
+    if p.get("rating"):
+        meta_bits.append(f"rating {p['rating']}")
+    return {
+        "up": up,
+        "dir_h": "Pronto a COMPRARE al prezzo giusto" if up
+                 else "Pronto a VENDERE al prezzo giusto",
+        "levels": levels,
+        "now": _current_price(lines),
+        "path": _pending_path(lines, p.get("ref_price")),
+        "left_min": left_min,
+        "expires_epoch": float(expires) if isinstance(expires, (int, float)) else None,
+        "leg_rows": leg_rows,
+        "meta": " · ".join(meta_bits),
+        "plain": plain,
+    }
+
+
 def _bet(op: dict | None, lines: list[str]) -> dict | None:
     if not op:
         return None
@@ -199,16 +332,25 @@ def _bet(op: dict | None, lines: list[str]) -> dict | None:
     entry, sl, tp = float(op.get("entry", 0)), float(op.get("sl", 0)), float(op.get("tp", 0))
     now = _current_price(lines)
     winning = None if now is None else (now > entry if up else now < entry)
-    return {
-        "up": up,
-        "dir_h": "Punta che SOL SALE" if up else "Punta che SOL SCENDE",
-        "entry": entry, "stop": sl, "target": tp, "now": now, "winning": winning,
-        "path": _price_path(lines, entry),
-        "plain": (
+    locked = bool(op.get("lock_armed"))
+    if locked:
+        plain = (
+            f"Ha {'comprato' if up else 'venduto'} a {entry:.2f} e il profitto è ormai "
+            f"BLOCCATO: incassa all'obiettivo {tp:.2f}, oppure a {sl:.2f} se il prezzo "
+            f"ci ritorna — in entrambi i casi chiude in guadagno."
+        )
+    else:
+        plain = (
             f"Ha {'comprato' if up else 'venduto'} a {entry:.2f}. "
             f"Chiude in GUADAGNO se SOL {'sale' if up else 'scende'} a {tp:.2f}; "
             f"in PERDITA se {'scende' if up else 'sale'} a {sl:.2f}."
-        ),
+        )
+    return {
+        "up": up, "locked": locked,
+        "dir_h": "Punta che SOL SALE" if up else "Punta che SOL SCENDE",
+        "entry": entry, "stop": sl, "target": tp, "now": now, "winning": winning,
+        "path": _price_path(lines, entry),
+        "plain": plain,
     }
 
 
@@ -246,24 +388,31 @@ def _snapshot() -> dict:
             winrate=(w / n * 100.0) if n else 0.0,
             equity_curve=[start] + [float(t.get("equity_after", eq)) for t in closed],
             bet=_bet(s.get("open"), lines),
+            pending=_pending(s.get("pending"), lines),
             closed=[
                 {
                     "at": str(t.get("closed_at", ""))[11:19],
                     "up": t.get("side") == "buy",
                     "win": (t.get("pnl", 0) or 0) >= 0,
                     "pnl": t.get("pnl"),
+                    "lk": t.get("outcome") == "LOCK",
+                    "ek": {"pullback": "ritraccio", "breakout": "rottura"}.get(
+                        t.get("entry_kind"), ""),
                 }
                 for t in closed[-8:]
             ],
         )
     else:
         snap.update(start=None, equity=None, pnl=0, ret=0, up=True, trades=0,
-                    wins=0, losses=0, winrate=0, equity_curve=[], bet=None, closed=[])
+                    wins=0, losses=0, winrate=0, equity_curve=[], bet=None,
+                    pending=None, closed=[])
 
     if stale:
         snap["head"] = {"text": "Il bot sembra BLOCCATO", "kind": "bad"}
     elif snap["bet"]:
         snap["head"] = {"text": "C'è una scommessa aperta — " + snap["bet"]["dir_h"], "kind": "open"}
+    elif snap.get("pending"):
+        snap["head"] = {"text": "Ordini piazzati — " + snap["pending"]["dir_h"], "kind": "pend"}
     elif any(x in " ".join(lines[-6:]).lower()
              for x in ("generativelanguage", "afc is enabled", "setup detected")):
         snap["head"] = {"text": "Sta studiando il mercato per decidere…", "kind": "think"}
@@ -305,10 +454,12 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
 .hero[data-a=red]{border-left-color:var(--red)}
 .hero[data-a=amber]{border-left-color:var(--amber)}
 .hero[data-a=slate]{border-left-color:var(--accent)}
+.hero[data-a=blue]{border-left-color:var(--blue)}
 .badge{flex:0 0 46px;height:46px;border-radius:13px;display:grid;place-items:center}
 .badge svg{width:26px;height:26px}
 .b-green{background:rgba(52,211,153,.14)}.b-red{background:rgba(251,113,133,.14)}
 .b-amber{background:rgba(251,191,36,.14)}.b-slate{background:rgba(138,162,255,.14)}
+.b-blue{background:rgba(96,165,250,.14)}
 .hero .tx{font-size:19px;font-weight:750;letter-spacing:-.01em;line-height:1.2}
 .hero .sub{font-size:12.5px;color:var(--dim);margin-top:3px;display:flex;align-items:center;gap:7px}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--dim)}
@@ -327,10 +478,17 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
 /* bet */
 .bet{padding:14px 18px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .bet .head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
-#betBody{display:flex;flex-direction:column;flex:1;min-height:0}
+#betBody{display:flex;flex-direction:column;flex:1;min-height:0;overflow:auto}
+.legs{margin-top:9px;display:flex;flex-direction:column;gap:5px;font-size:12.5px}
+.legrow{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;line-height:1.35}
+.lk{font-weight:700;padding:1px 8px;border-radius:6px;font-size:11px;letter-spacing:.03em;white-space:nowrap}
+.lk.pull{background:rgba(96,165,250,.16);color:var(--blue)}
+.lk.brk{background:rgba(138,162,255,.16);color:var(--accent)}
+.legmeta{color:var(--dim);font-size:11.5px;margin-top:2px}
 .pill{padding:5px 13px;border-radius:30px;font-weight:750;font-size:13.5px;display:inline-flex;gap:7px;align-items:center}
 .pill.up{background:rgba(52,211,153,.15);color:var(--green)}
 .pill.down{background:rgba(251,113,133,.15);color:var(--red)}
+.pill.wait{background:rgba(96,165,250,.15);color:var(--blue)}
 .bar{position:relative;height:13px;border-radius:30px;margin:42px 6px 6px;
  background:linear-gradient(90deg,rgba(251,113,133,.85),rgba(251,191,36,.55) 50%,rgba(52,211,153,.85))}
 .bar .mk{position:absolute;top:50%;transform:translate(-50%,-50%)}
@@ -358,6 +516,7 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
 .ev .d.open{background:var(--blue)}.ev .d.win{background:var(--green)}.ev .d.loss{background:var(--red)}
 .ev .d.veto{background:var(--amber)}.ev .d.ok{background:var(--green)}.ev .d.warn{background:var(--amber)}
 .ev .d.dec{background:var(--accent)}.ev .d.think{background:var(--blue)}
+.ev .d.pend{background:var(--blue)}
 .ev .t{color:var(--dim);font-variant-numeric:tabular-nums;flex:0 0 54px;font-size:12.5px}
 .tbl{width:100%;border-collapse:collapse;font-size:13px}
 .tbl th,.tbl td{padding:7px 10px;text-align:left}
@@ -386,7 +545,7 @@ body{margin:0;color:var(--txt);-webkit-font-smoothing:antialiased;
           <div class="v num" id="trades">—</div><div class="s" id="wl"></div></div>
       </div>
       <div class="bet card">
-        <div class="head"><span class="micro">Scommessa in corso</span><span id="betPill"></span></div>
+        <div class="head"><span class="micro" id="betLabel">Scommessa in corso</span><span id="betPill"></span></div>
         <div id="betBody" style="min-height:0"></div>
       </div>
     </div>
@@ -409,6 +568,7 @@ function icon(kind,up){
    ? '<svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.4"><path d="M5 17L13 9l3 3 4-5"/><path d="M14 7h6v6"/></svg>'
    : '<svg viewBox="0 0 24 24" fill="none" stroke="#fb7185" stroke-width="2.4"><path d="M5 7l8 8 3-3 4 5"/><path d="M14 17h6v-6"/></svg>';
  if(kind==='think') return '<svg viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+ if(kind==='pend') return '<svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2.2"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></svg>';
  if(kind==='bad') return '<svg viewBox="0 0 24 24" fill="none" stroke="#fb7185" stroke-width="2.2"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg>';
  return '<svg viewBox="0 0 24 24" fill="none" stroke="#8aa2ff" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>';
 }
@@ -420,6 +580,23 @@ function spark(pts){if(!pts||pts.length<2)return"";
  const area=`0,44 `+line+` 300,44`;
  return `<polygon points="${area}" fill="${c}" opacity=".10"/><polyline points="${line}" fill="none" stroke="${c}" stroke-width="2.5"/>`;}
 function frac(b,price){return clamp(b.up?(price-b.stop)/(b.target-b.stop):(b.stop-price)/(b.stop-b.target));}
+function pendChart(p){
+ const pts=(p.path&&p.path.length)?p.path:[];
+ const lv=p.levels||[];
+ const vals=pts.concat(lv.map(x=>x.v)).concat(p.now!=null?[p.now]:[]);
+ if(!vals.length) return '<div class="dim" style="padding:6px 0">in attesa dei primi dati di prezzo…</div>';
+ let lo=Math.min(...vals),hi=Math.max(...vals);const pad=(hi-lo)*0.10||1;lo-=pad;hi+=pad;
+ const Y=v=>(100*(1-(v-lo)/(hi-lo)));
+ const X=i=>(pts.length<2?0:100*i/(pts.length-1));
+ const C={entry:'#60a5fa',target:'#34d399',inval:'#fb7185'};
+ const hl=lv.map(x=>`<line x1="0" y1="${Y(x.v).toFixed(2)}" x2="100" y2="${Y(x.v).toFixed(2)}" stroke="${C[x.k]||'#8696ad'}" stroke-width="1.5" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>`).join('');
+ const line=pts.map((v,i)=>X(i).toFixed(2)+","+Y(v).toFixed(2)).join(" ");
+ const svg=`<svg class="chart" viewBox="0 0 100 100" preserveAspectRatio="none">${hl}`+
+   (pts.length>1?`<polyline points="${line}" fill="none" stroke="#dbe6f5" stroke-width="2" vector-effect="non-scaling-stroke"/>`:'')+`</svg>`;
+ const labs=lv.map(x=>`<div class="lab" style="top:${Y(x.v).toFixed(1)}%;color:${C[x.k]||'#8696ad'}">${x.lab}</div>`).join('')+
+   (p.now!=null?`<div class="lab now" style="top:${Y(p.now).toFixed(1)}%">ora ${f(p.now)}</div>`:'');
+ return `<div class="chartwrap">${svg}${labs}</div>`;
+}
 function chart(b){
  const pts=(b.path&&b.path.length)?b.path:[b.entry];
  const vals=pts.concat([b.stop,b.target,b.entry]);
@@ -436,7 +613,7 @@ function chart(b){
    <polyline points="${line}" fill="none" stroke="#dbe6f5" stroke-width="2" vector-effect="non-scaling-stroke"/>
   </svg>`;
  const labs=`<div class="lab tp" style="top:${Y(b.target).toFixed(1)}%">🎯 obiettivo ${f(b.target)}</div>
-   <div class="lab sl" style="top:${Y(b.stop).toFixed(1)}%">🛑 stop ${f(b.stop)}</div>`+
+   <div class="lab ${b.locked?'tp':'sl'}" style="top:${Y(b.stop).toFixed(1)}%">${b.locked?'🔒 blocco':'🛑 stop'} ${f(b.stop)}</div>`+
    (b.now!=null?`<div class="lab now" style="top:${Y(b.now).toFixed(1)}%;color:${b.winning?'#34d399':b.winning===false?'#fb7185':'#fff'}">ora ${f(b.now)}${b.winning==null?'':b.winning?' ✓':' ✕'}</div>`:'');
  return svg+labs;
 }
@@ -444,7 +621,7 @@ function chart(b){
 async function tick(){
  let s;try{s=await(await fetch('/api')).json();}catch(e){document.getElementById('heroText').textContent='Dashboard scollegata…';return;}
  const k=s.head.kind, up=s.bet&&s.bet.up;
- const a=k==='open'?(up?'green':'red'):k==='think'?'amber':k==='bad'?'red':'slate';
+ const a=k==='open'?(up?'green':'red'):k==='think'?'amber':k==='bad'?'red':k==='pend'?'blue':'slate';
  const hero=document.getElementById('hero');hero.dataset.a=a;
  const badge=document.getElementById('badge');badge.className='badge b-'+a;badge.innerHTML=icon(k,up);
  document.getElementById('heroText').textContent=s.head.text;
@@ -463,23 +640,41 @@ async function tick(){
  document.getElementById('trades').textContent=s.trades;
  document.getElementById('wl').textContent=s.trades?(s.wins+' vinte · '+s.losses+' perse'):'ancora nessuna';
 
- const pill=document.getElementById('betPill'), body=document.getElementById('betBody');
+ const pill=document.getElementById('betPill'), body=document.getElementById('betBody'),
+       label=document.getElementById('betLabel');
  if(s.bet){const b=s.bet;
+  label.textContent='Scommessa in corso';
   pill.innerHTML=`<span class="pill ${b.up?'up':'down'}">${b.dir_h}</span>`;
   body.innerHTML=`<div class="chartwrap">${chart(b)}</div><div class="plain">${b.plain}</div>`;
- }else{pill.innerHTML='';
+ }else if(s.pending){const p=s.pending;
+  label.textContent='Ordini in attesa (OCO)';
+  pill.innerHTML=`<span class="pill wait">${p.dir_h}${p.expires_epoch!=null?' · <span id="pendCd" data-exp="'+p.expires_epoch+'">…</span>':''}</span>`;
+  const legs=(p.leg_rows&&p.leg_rows.length)?`<div class="legs">`+p.leg_rows.map(r=>
+    `<div class="legrow"><span class="lk ${r.k}">${r.name}</span><span>${r.head}</span>`+
+    `${r.target?`<span class="dim">· ${r.target}</span>`:''}${r.inval?`<span class="dim">· ${r.inval}</span>`:''}</div>`).join('')+
+    `${p.meta?`<div class="legmeta">${p.meta}</div>`:''}</div>`:'';
+  body.innerHTML=pendChart(p)+legs+`<div class="plain">${p.plain}</div>`;
+  cdTick();
+ }else{label.textContent='Scommessa in corso';pill.innerHTML='';
   body.innerHTML='<div class="dim" style="padding:6px 0 4px">Nessuna scommessa aperta — il bot sta aspettando il momento giusto.</div>';}
 
  document.getElementById('events').innerHTML=(s.events||[]).slice().reverse()
    .map(e=>`<li><span class="d ${e.k||''}"></span><span class="t">${e.t}</span><span>${e.h}</span></li>`).join('')
    ||'<li class="dim">nessuna mossa ancora</li>';
  document.getElementById('closed').innerHTML=(s.closed||[]).slice().reverse()
-   .map(t=>`<tr><td class="dim">${t.at}</td><td>${t.up?'📈 Rialzo':'📉 Ribasso'}</td>
-     <td><span class="chip ${t.win?'win':'loss'}">${t.win?'obiettivo':'stop'}</span></td>
+   .map(t=>`<tr><td class="dim">${t.at}</td><td>${t.up?'📈 Rialzo':'📉 Ribasso'}${t.ek?' <span class="dim">· '+t.ek+'</span>':''}</td>
+     <td><span class="chip ${t.win?'win':'loss'}">${t.lk?'protetto':(t.win?'obiettivo':'stop')}</span></td>
      <td class="${t.win?'green':'red'} num">${(t.pnl>=0?'+':'')+f(t.pnl)} $</td></tr>`).join('')
    ||'<tr><td colspan="4" class="dim">ancora nessuna operazione chiusa</td></tr>';
 }
-tick();setInterval(tick,3000);
+function cdTick(){
+ const el=document.getElementById('pendCd');if(!el)return;
+ const sLeft=Math.max(0,Math.floor(Number(el.dataset.exp)-Date.now()/1000));
+ if(sLeft<=0){el.textContent='SCADUTI — rianalisi al prossimo ciclo';return;}
+ const h=Math.floor(sLeft/3600),m=Math.floor((sLeft%3600)/60),sec=sLeft%60;
+ el.textContent='validi ancora '+(h>0?h+'h ':'')+m+'m '+String(sec).padStart(2,'0')+'s';
+}
+tick();setInterval(tick,3000);setInterval(cdTick,1000);
 </script></body></html>"""
 
 

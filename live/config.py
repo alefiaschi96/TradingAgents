@@ -91,6 +91,14 @@ class Config:
     margin_currency: str    # collateral currency to read from the wallet
     equity_floor_usd: float  # kill-switch: no new trades below this equity
 
+    # --- conditional entries (paper-sim) ----------------------------------
+    entry_mode: str        # "plan" honours the PM's conditional entry legs | "market" enters immediately
+    entry_ttl_min: float   # pending conditional entries expire after this many minutes unfilled
+    entry_max_stop_widen: float  # cap on widening the SL to the PM's invalidation, as a multiple of the ATR stop distance
+    profit_lock_pct: float  # once price gets within this % of the TP, that level becomes a floor: a return to it closes the trade in profit; 0 = off
+    conditional_holds: bool  # let a HOLD that names a nearby trigger level continue to the debate/PM (may park conditional entries)
+    conditional_max_atr: float  # the named trigger must be within this many ATRs of price to qualify
+
     # --- behaviour --------------------------------------------------------
     allow_short: bool      # if False, SELL/Underweight => stay flat
     live: bool             # if False, orders are logged but NOT sent
@@ -156,6 +164,12 @@ class Config:
             balance_pct=_f("BALANCE_PCT", 0.98),
             margin_currency=_s("MARGIN_CURRENCY", "USD"),
             equity_floor_usd=_f("EQUITY_FLOOR_USD", 0.0),
+            entry_mode=_s("ENTRY_MODE", "plan"),
+            entry_ttl_min=_f("ENTRY_TTL_MIN", 120.0),
+            entry_max_stop_widen=_f("ENTRY_MAX_STOP_WIDEN", 2.0),
+            profit_lock_pct=_f("PROFIT_LOCK_PCT", 0.0),
+            conditional_holds=_b("CONDITIONAL_HOLDS", False),
+            conditional_max_atr=_f("CONDITIONAL_MAX_ATR", 2.0),
             allow_short=_b("ALLOW_SHORT", True),
             live=live,
             no_broker=no_broker,
@@ -199,4 +213,8 @@ class Config:
             "regime_filter": self.regime_filter,
             "analyst_gate": self.analyst_gate,
             "prediction_markets": self.prediction_markets,
+            "entry_mode": self.entry_mode,
+            "entry_ttl_min": self.entry_ttl_min,
+            "profit_lock_pct": self.profit_lock_pct,
+            "conditional_holds": self.conditional_holds,
         }

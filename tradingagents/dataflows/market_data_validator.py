@@ -15,11 +15,20 @@ from collections.abc import Iterable
 import pandas as pd
 from stockstats import wrap
 
+from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.stockstats_utils import load_ohlcv
 
 # A fixed, common indicator set so the snapshot is the same shape every run.
 DEFAULT_SNAPSHOT_INDICATORS: tuple[str, ...] = (
     "close_10_ema", "close_50_sma", "close_200_sma",
+    "rsi", "boll", "boll_ub", "boll_lb",
+    "macd", "macds", "macdh", "atr",
+)
+
+# Intraday snapshot set: fast EMAs, VWAP (the intraday fair-value anchor),
+# momentum, volatility — periods are in bars, not days.
+INTRADAY_SNAPSHOT_INDICATORS: tuple[str, ...] = (
+    "close_9_ema", "close_21_ema", "vwap",
     "rsi", "boll", "boll_ub", "boll_lb",
     "macd", "macds", "macdh", "atr",
 )
@@ -31,7 +40,23 @@ def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:
     ``load_ohlcv`` already normalizes the Date column and filters out
     look-ahead rows, but we re-apply the cutoff defensively — this is a
     verification path, so it must not trust its input to be pre-filtered.
+
+    In intraday mode the snapshot must match what the analyst sees, so we pull
+    intraday bars from the same Kraken source as get_stock_data/get_indicators
+    (the daily look-ahead cutoff does not apply: live analysis is "as of now").
     """
+    from tradingagents.dataflows.config import get_config
+
+    if get_config().get("intraday"):
+        from tradingagents.dataflows.crypto_intraday import fetch_intraday_ohlcv
+
+        df = fetch_intraday_ohlcv(symbol)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date"]).sort_values("Date")
+        if df.empty:
+            raise ValueError(f"No intraday OHLCV rows for {symbol}.")
+        return df
+
     data = load_ohlcv(symbol, curr_date)
     if data is None or data.empty:
         raise ValueError(f"No OHLCV data available for {symbol}.")
@@ -69,10 +94,18 @@ def build_verified_market_snapshot(
     # `df` keeps the original capitalized OHLCV columns (Open/High/Low/Close/
     # Volume); stockstats `wrap()` lowercases columns and adds indicator
     # columns, so read raw prices from `df` and indicators from `stock_df`.
+    intraday = bool(get_config().get("intraday"))
     df = _verified_rows(symbol, curr_date)
     stock_df = wrap(df.copy())
 
-    selected = tuple(indicators or DEFAULT_SNAPSHOT_INDICATORS)
+    def _fmt_dt(value):
+        """Show the bar time intraday; date-only for daily."""
+        if intraday and isinstance(value, pd.Timestamp):
+            return value.strftime("%Y-%m-%d %H:%M")
+        return _fmt(value)
+
+    default_set = INTRADAY_SNAPSHOT_INDICATORS if intraday else DEFAULT_SNAPSHOT_INDICATORS
+    selected = tuple(indicators or default_set)
     indicator_values: dict[str, str] = {}
     for name in selected:
         try:
@@ -82,16 +115,27 @@ def build_verified_market_snapshot(
             indicator_values[name] = f"N/A ({type(exc).__name__})"
 
     latest = df.iloc[-1]
-    latest_date = _fmt(latest["Date"])
+    latest_date = _fmt_dt(latest["Date"])
     window = max(1, min(int(look_back_days), 30))
     recent = df.tail(window)
 
-    lines = [
-        f"## Verified market data snapshot for {symbol.upper()}",
-        "",
-        f"- Requested analysis date: {curr_date}",
-        f"- Latest trading row used: {latest_date}",
-        "- Rows after the requested analysis date are excluded before verification.",
+    if intraday:
+        tf = get_config().get("intraday_timeframe", "15m")
+        header_lines = [
+            f"## Verified market data snapshot for {symbol.upper()} ({tf} intraday bars)",
+            "",
+            f"- Most recent bar (treat as the current moment): {latest_date} UTC",
+            "- Bars run up to now; the latest bar is still forming.",
+        ]
+    else:
+        header_lines = [
+            f"## Verified market data snapshot for {symbol.upper()}",
+            "",
+            f"- Requested analysis date: {curr_date}",
+            f"- Latest trading row used: {latest_date}",
+            "- Rows after the requested analysis date are excluded before verification.",
+        ]
+    lines = header_lines + [
         "",
         "### Latest verified OHLCV row",
         "",
@@ -109,7 +153,7 @@ def build_verified_market_snapshot(
     lines += ["", f"### Recent verified closes (last {len(recent)} rows)", "",
               "| Date | Close |", "|---|---:|"]
     for _, row in recent.iterrows():
-        lines.append(f"| {_fmt(row['Date'])} | {_fmt(row.get('Close'))} |")
+        lines.append(f"| {_fmt_dt(row['Date'])} | {_fmt(row.get('Close'))} |")
 
     lines += [
         "",

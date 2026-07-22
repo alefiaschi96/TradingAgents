@@ -28,10 +28,12 @@ from tradingagents.agents.utils.agent_utils import (
     resolve_instrument_identity,
 )
 from tradingagents.agents.utils.futures_data_tools import (
+    get_btc_trend,
     get_funding_rate,
     get_open_interest,
     get_orderbook_imbalance,
 )
+from tradingagents.agents.utils.sl_tp_tools import get_sl_tp_levels
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
@@ -185,6 +187,9 @@ class TradingAgentsGraph:
                     get_funding_rate,
                     get_open_interest,
                     get_orderbook_imbalance,
+                    # Intraday-specific tools (SL/TP levels, BTC trend)
+                    get_sl_tp_levels,
+                    get_btc_trend,
                 ]
             ),
             "social": ToolNode(

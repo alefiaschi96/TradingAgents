@@ -147,6 +147,8 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+logs/
+
 # Environments
 .env
 .env.live

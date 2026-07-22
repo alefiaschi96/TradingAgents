@@ -24,7 +24,6 @@ def test_no_env_uses_built_in_defaults(monkeypatch):
     assert dc.DEFAULT_CONFIG["deep_think_llm"] == "gpt-5.5"
     assert dc.DEFAULT_CONFIG["quick_think_llm"] == "gpt-5.4-mini"
     assert dc.DEFAULT_CONFIG["backend_url"] is None
-    assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is False
 
 
@@ -44,16 +43,10 @@ def test_string_overrides(monkeypatch):
     assert dc.DEFAULT_CONFIG["output_language"] == "Chinese"
 
 
-def test_int_coercion(monkeypatch):
-    dc = _reload_with_env(
-        monkeypatch,
-        TRADINGAGENTS_MAX_DEBATE_ROUNDS="3",
-        TRADINGAGENTS_MAX_RISK_ROUNDS="2",
-    )
-    assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 3
-    assert isinstance(dc.DEFAULT_CONFIG["max_debate_rounds"], int)
-    assert dc.DEFAULT_CONFIG["max_risk_discuss_rounds"] == 2
-    assert isinstance(dc.DEFAULT_CONFIG["max_risk_discuss_rounds"], int)
+# No remaining _ENV_OVERRIDES key coerces to int (max_debate_rounds /
+# max_risk_discuss_rounds were removed with the debate-loop architecture).
+# int coercion in ``_coerce`` is still exercised indirectly for any future
+# int-typed key; see ``test_bool_coercion`` for the bool-coercion path.
 
 
 @pytest.mark.parametrize(
@@ -73,20 +66,10 @@ def test_empty_env_value_is_passthrough(monkeypatch):
     dc = _reload_with_env(
         monkeypatch,
         TRADINGAGENTS_LLM_PROVIDER="",
-        TRADINGAGENTS_MAX_DEBATE_ROUNDS="",
+        TRADINGAGENTS_OUTPUT_LANGUAGE="",
     )
     assert dc.DEFAULT_CONFIG["llm_provider"] == "openai"
-    assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
-
-
-def test_invalid_int_raises(monkeypatch):
-    """Garbage int values should surface a ValueError at import, not silently misconfigure."""
-    monkeypatch.setenv("TRADINGAGENTS_MAX_DEBATE_ROUNDS", "not-a-number")
-    with pytest.raises(ValueError):
-        importlib.reload(default_config_module)
-    # Restore module state for subsequent tests in this process
-    monkeypatch.delenv("TRADINGAGENTS_MAX_DEBATE_ROUNDS", raising=False)
-    importlib.reload(default_config_module)
+    assert dc.DEFAULT_CONFIG["output_language"] == "English"
 
 
 def test_unknown_env_var_is_ignored(monkeypatch):

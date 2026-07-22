@@ -53,50 +53,101 @@ class TraderAction(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Research Manager
+# Signal Synthesizer
 # ---------------------------------------------------------------------------
 
 
-class ResearchPlan(BaseModel):
-    """Structured investment plan produced by the Research Manager.
+class SignalDecision(BaseModel):
+    """Structured directional call produced by the Signal Synthesizer.
 
-    Hand-off to the Trader: the recommendation pins the directional view,
-    the rationale captures which side of the bull/bear debate carried the
-    argument, and the strategic actions translate that into concrete
-    instructions the trader can execute against.
+    Single-pass replacement for the old bull/bear debate + Research Manager:
+    reads the analysts' reports directly and commits to a rating in one shot,
+    with no back-and-forth rounds.
     """
 
-    recommendation: PortfolioRating = Field(
+    rating: PortfolioRating = Field(
         description=(
-            "The investment recommendation. Exactly one of Buy / Overweight / "
-            "Hold / Underweight / Sell. Reserve Hold for situations where the "
-            "evidence on both sides is genuinely balanced; otherwise commit to "
-            "the side with the stronger arguments."
+            "The directional call. Exactly one of Buy / Overweight / Hold / "
+            "Underweight / Sell. Reserve Hold for situations where the "
+            "evidence is genuinely balanced; otherwise commit to the side "
+            "with the stronger intraday evidence."
         ),
     )
     rationale: str = Field(
         description=(
-            "Conversational summary of the key points from both sides of the "
-            "debate, ending with which arguments led to the recommendation. "
-            "Speak naturally, as if to a teammate."
+            "Conversational synthesis of the analysts' reports, ending with "
+            "which evidence led to this rating. Speak naturally, as if to a "
+            "teammate."
         ),
     )
-    strategic_actions: str = Field(
+    key_evidence: str = Field(
         description=(
-            "Concrete steps for the trader to implement the recommendation, "
-            "including position sizing guidance consistent with the rating."
+            "The 2-4 strongest, most concrete pieces of evidence (specific "
+            "price levels, indicator readings, positioning data, or news) "
+            "backing this call."
         ),
     )
 
 
-def render_research_plan(plan: ResearchPlan) -> str:
-    """Render a ResearchPlan to markdown for storage and the trader's prompt context."""
+def render_signal_decision(decision: SignalDecision) -> str:
+    """Render a SignalDecision to markdown for storage and downstream prompts."""
     return "\n".join([
-        f"**Recommendation**: {plan.recommendation.value}",
+        f"**Rating**: {decision.rating.value}",
         "",
-        f"**Rationale**: {plan.rationale}",
+        f"**Rationale**: {decision.rationale}",
         "",
-        f"**Strategic Actions**: {plan.strategic_actions}",
+        f"**Key Evidence**: {decision.key_evidence}",
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Critic Manager
+# ---------------------------------------------------------------------------
+
+
+class CriticVerdict(BaseModel):
+    """Structured critique produced by the Critic Manager.
+
+    The critic's job is to doubt the Signal Synthesizer's call: is the
+    predicted move actually big enough, clean enough, and well-supported
+    enough to be worth trading, once noise and conflicting signals are
+    accounted for? It may only hold or soften conviction — it never flips
+    the direction the Synthesizer picked.
+    """
+
+    verdict: Literal["Approve", "Downgrade", "Veto"] = Field(
+        description=(
+            "Approve: the edge is real and worth trading at the Synthesizer's "
+            "conviction. Downgrade: there is some edge but it's weaker than "
+            "claimed (conflicting signals, noise-sized move, thin evidence) — "
+            "soften conviction one notch (e.g. Buy -> Overweight) but keep "
+            "the direction. Veto: the case is not worth trading at all this "
+            "round (no real edge, or evidence too conflicting) — force Hold."
+        ),
+    )
+    rating: PortfolioRating = Field(
+        description=(
+            "The rating after applying the verdict: unchanged from the "
+            "Synthesizer on Approve, one notch softer on Downgrade (same "
+            "direction), or Hold on Veto."
+        ),
+    )
+    critique: str = Field(
+        description=(
+            "2-4 sentences explaining what was scrutinized (edge size, "
+            "signal agreement, data quality) and why the verdict follows."
+        ),
+    )
+
+
+def render_critic_verdict(verdict: CriticVerdict) -> str:
+    """Render a CriticVerdict to markdown for storage and the trader's prompt context."""
+    return "\n".join([
+        f"**Verdict**: {verdict.verdict}",
+        "",
+        f"**Rating**: {verdict.rating.value}",
+        "",
+        f"**Critique**: {verdict.critique}",
     ])
 
 
@@ -120,20 +171,10 @@ class TraderProposal(BaseModel):
     reasoning: str = Field(
         description=(
             "The case for this action, anchored in the analysts' reports and "
-            "the research plan. Two to four sentences."
+            "the critic-reviewed signal. Two to four sentences. Do not "
+            "propose entry, stop-loss, or position size — the Risk Manager "
+            "computes those deterministically from ATR."
         ),
-    )
-    entry_price: float | None = Field(
-        default=None,
-        description="Optional entry price target in the instrument's quote currency.",
-    )
-    stop_loss: float | None = Field(
-        default=None,
-        description="Optional stop-loss price in the instrument's quote currency.",
-    )
-    position_sizing: str | None = Field(
-        default=None,
-        description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
 
 
@@ -148,82 +189,105 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         f"**Action**: {proposal.action.value}",
         "",
         f"**Reasoning**: {proposal.reasoning}",
-    ]
-    if proposal.entry_price is not None:
-        parts.extend(["", f"**Entry Price**: {proposal.entry_price}"])
-    if proposal.stop_loss is not None:
-        parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
-    if proposal.position_sizing:
-        parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
-    parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
-    ])
+    ]
     return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
-# Portfolio Manager
+# Risk Manager
 # ---------------------------------------------------------------------------
 
 
-class PortfolioDecision(BaseModel):
-    """Structured output produced by the Portfolio Manager.
+class PositionSize(str, Enum):
+    """Conviction-scaled position-size tier.
 
-    The model fills every field as part of its primary LLM call; no separate
-    extraction pass is required. Field descriptions double as the model's
-    output instructions, so the prompt body only needs to convey context and
-    the rating-scale guidance.
+    Informational only: no live equity figure is available at analysis time,
+    so this is a qualitative sizing recommendation for the report/logs, not a
+    dollar amount. Actual order sizing in live/paper execution keeps using
+    its own config-driven logic.
+    """
+
+    FULL = "Full"
+    HALF = "Half"
+    QUARTER = "Quarter"
+    NONE = "None"
+
+
+class RiskDecision(BaseModel):
+    """Structured output produced by the Risk Manager.
+
+    The Risk Manager is the only agent that speaks to stop-loss, take-profit,
+    and position size — and it must source stop_loss/take_profit from the
+    deterministic ATR tool (``get_sl_tp_levels``), never invent them. The LLM
+    call that fills this schema is instructed to copy the tool's numbers
+    verbatim and only decide the final rating and position-size tier.
     """
 
     rating: PortfolioRating = Field(
         description=(
             "The final position rating. Exactly one of Buy / Overweight / Hold / "
-            "Underweight / Sell, picked based on the analysts' debate."
+            "Underweight / Sell — normally the Critic Manager's rating, or Hold "
+            "if the critic vetoed the trade."
         ),
     )
-    executive_summary: str = Field(
-        description=(
-            "A concise action plan covering entry strategy, position sizing, "
-            "key risk levels, and time horizon. Two to four sentences."
-        ),
-    )
-    investment_thesis: str = Field(
-        description=(
-            "Detailed reasoning anchored in specific evidence from the analysts' "
-            "debate. If prior lessons are referenced in the prompt context, "
-            "incorporate them; otherwise rely solely on the current analysis."
-        ),
-    )
-    price_target: float | None = Field(
+    stop_loss: float | None = Field(
         default=None,
-        description="Optional target price in the instrument's quote currency.",
+        description=(
+            "Stop-loss price from the ATR tool output, copied verbatim. None "
+            "when the rating is Hold."
+        ),
     )
-    time_horizon: str | None = Field(
+    take_profit: float | None = Field(
         default=None,
-        description="Optional recommended holding period appropriate to the trade horizon (e.g. '90 minutes' for an intraday trade, or '3-6 months' for a position trade).",
+        description=(
+            "Take-profit price from the ATR tool output (2R target), copied "
+            "verbatim. None when the rating is Hold."
+        ),
+    )
+    position_size: PositionSize = Field(
+        description=(
+            "Conviction-scaled size tier: Full for Buy/Sell, Half for "
+            "Overweight/Underweight or when the critic downgraded conviction, "
+            "None for Hold."
+        ),
+    )
+    risk_rationale: str = Field(
+        description=(
+            "2-4 sentences explaining the SL/TP levels (ATR-based or "
+            "structural) and the position-size tier chosen."
+        ),
     )
 
 
-def render_pm_decision(decision: PortfolioDecision) -> str:
-    """Render a PortfolioDecision back to the markdown shape the rest of the system expects.
+def render_risk_decision(decision: RiskDecision) -> str:
+    """Render a RiskDecision back to the markdown shape the rest of the system expects.
 
-    Memory log, CLI display, and saved report files all read this markdown,
-    so the rendered output preserves the exact section headers (``**Rating**``,
-    ``**Executive Summary**``, ``**Investment Thesis**``) that downstream
-    parsers and the report writers already handle.
+    Memory log, CLI display, and saved reports all read this markdown;
+    ``**Rating**`` must stay the first header so ``rating.py``'s
+    ``parse_rating`` keeps working unchanged. ``**Price Target**`` mirrors
+    ``take_profit`` — ``paper_sim``/``live``'s target-gate veto
+    (``parse_price_target`` / ``min_analyst_rr``) reads that exact label, so
+    keeping it here means the deterministic ATR take-profit now grounds that
+    gate instead of an LLM-guessed price target, with no execution-side code
+    changes required.
     """
     parts = [
         f"**Rating**: {decision.rating.value}",
         "",
-        f"**Executive Summary**: {decision.executive_summary}",
+        f"**Stop Loss**: {decision.stop_loss if decision.stop_loss is not None else 'n/a'}",
         "",
-        f"**Investment Thesis**: {decision.investment_thesis}",
+        f"**Take Profit**: {decision.take_profit if decision.take_profit is not None else 'n/a'}",
     ]
-    if decision.price_target is not None:
-        parts.extend(["", f"**Price Target**: {decision.price_target}"])
-    if decision.time_horizon:
-        parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.take_profit is not None:
+        parts.extend(["", f"**Price Target**: {decision.take_profit}"])
+    parts.extend([
+        "",
+        f"**Position Size**: {decision.position_size.value}",
+        "",
+        f"**Risk Rationale**: {decision.risk_rationale}",
+    ])
     return "\n".join(parts)
 
 

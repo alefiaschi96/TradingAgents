@@ -360,14 +360,10 @@ def _snapshot() -> dict:
 _REASON_FIELDS = [
     ("Market analyst (tecnica intraday)", "market_report"),
     ("News / catalizzatori", "news_report"),
-    ("Toro — tesi rialzista", "bull_case"),
-    ("Orso — tesi ribassista", "bear_case"),
-    ("Research manager", "research_manager_plan"),
+    ("Signal synthesizer", "signal_decision"),
+    ("Critic manager", "critic_review"),
     ("Trader (proposta)", "trader_proposal"),
-    ("Rischio · aggressivo", "risk_aggressive"),
-    ("Rischio · conservativo", "risk_conservative"),
-    ("Rischio · neutrale", "risk_neutral"),
-    ("Portfolio Manager — decisione finale", "pm_decision"),
+    ("Risk manager — decisione finale", "risk_manager_decision"),
 ]
 
 

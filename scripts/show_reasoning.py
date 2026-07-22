@@ -1,9 +1,9 @@
 """Print the captured analyst reasoning from a per-run JSONL, readably.
 
 Every decision logs an "analysis" event with the full chain (market + news
-reports, bull/bear case, research manager, trader, the three risk debaters, and
-the PM's final decision). This pretty-prints it so you can actually read why the
-bot decided what it did.
+reports, the Signal Synthesizer's call, the Critic Manager's review, the
+trader's proposal, and the Risk Manager's final decision). This pretty-prints
+it so you can actually read why the bot decided what it did.
 
 Usage:
     python scripts/show_reasoning.py                 # latest analysis of the current run
@@ -23,14 +23,10 @@ import sys
 _FIELDS = [
     ("MARKET ANALYST", "market_report"),
     ("NEWS / CATALYSTS", "news_report"),
-    ("BULL", "bull_case"),
-    ("BEAR", "bear_case"),
-    ("RESEARCH MANAGER", "research_manager_plan"),
+    ("SIGNAL SYNTHESIZER", "signal_decision"),
+    ("CRITIC MANAGER", "critic_review"),
     ("TRADER", "trader_proposal"),
-    ("RISK — aggressive", "risk_aggressive"),
-    ("RISK — conservative", "risk_conservative"),
-    ("RISK — neutral", "risk_neutral"),
-    ("PORTFOLIO MANAGER (final)", "pm_decision"),
+    ("RISK MANAGER (final)", "risk_manager_decision"),
 ]
 
 

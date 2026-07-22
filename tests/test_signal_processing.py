@@ -1,11 +1,10 @@
 """Tests for the shared rating heuristic and the SignalProcessor adapter.
 
-The Portfolio Manager produces a typed PortfolioDecision via structured
-output and renders it to markdown that always contains a ``**Rating**: X``
-header.  The deterministic heuristic in ``tradingagents.agents.utils.rating``
-is therefore sufficient to extract the rating downstream — no second LLM
-call is needed — and SignalProcessor is now a thin adapter that delegates
-to it.
+The Risk Manager produces a typed RiskDecision via structured output and
+renders it to markdown that always contains a ``**Rating**: X`` header. The
+deterministic heuristic in ``tradingagents.agents.utils.rating`` is
+therefore sufficient to extract the rating downstream — no second LLM call
+is needed — and SignalProcessor is now a thin adapter that delegates to it.
 """
 
 import pytest
@@ -34,7 +33,7 @@ class TestParseRating:
         assert parse_rating("**Rating**: Underweight\nTrim exposure.") == "Underweight"
 
     def test_rendered_pm_markdown_shape(self):
-        # The exact shape produced by render_pm_decision must always parse.
+        # The exact shape produced by render_risk_decision must always parse.
         text = (
             "**Rating**: Buy\n\n"
             "**Executive Summary**: Enter at $189-192, 6% portfolio cap.\n\n"

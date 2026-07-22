@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
-from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
+from tradingagents.agents.decision.critic_manager import create_critic_manager
+from tradingagents.agents.schemas import CriticVerdict, PortfolioRating
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.reflection import Reflector
@@ -59,44 +59,28 @@ def _price_df(prices):
     return pd.DataFrame({"Close": prices})
 
 
-def _make_pm_state(past_context=""):
-    """Minimal AgentState dict for portfolio_manager_node."""
+def _make_critic_state(past_context=""):
+    """Minimal AgentState dict for critic_manager_node."""
     return {
         "company_of_interest": "NVDA",
         "past_context": past_context,
-        "risk_debate_state": {
-            "history": "Risk debate history.",
-            "aggressive_history": "",
-            "conservative_history": "",
-            "neutral_history": "",
-            "judge_decision": "",
-            "current_aggressive_response": "",
-            "current_conservative_response": "",
-            "current_neutral_response": "",
-            "count": 1,
-        },
-        "market_report": "Market report.",
-        "sentiment_report": "Sentiment report.",
-        "news_report": "News report.",
-        "fundamentals_report": "Fundamentals report.",
-        "investment_plan": "Research plan.",
-        "trader_investment_plan": "Trader plan.",
+        "signal_decision": "**Rating**: Buy\n\n**Rationale**: Signal rationale.\n\n**Key Evidence**: Evidence.",
     }
 
 
-def _structured_pm_llm(captured: dict, decision: PortfolioDecision | None = None):
+def _structured_critic_llm(captured: dict, verdict: CriticVerdict | None = None):
     """Build a MagicMock LLM whose with_structured_output binding captures the
-    prompt and returns a real PortfolioDecision (so render_pm_decision works).
+    prompt and returns a real CriticVerdict (so render_critic_verdict works).
     """
-    if decision is None:
-        decision = PortfolioDecision(
+    if verdict is None:
+        verdict = CriticVerdict(
+            verdict="Approve",
             rating=PortfolioRating.HOLD,
-            executive_summary="Hold the position; await catalyst.",
-            investment_thesis="Balanced view; neither side carried the debate.",
+            critique="Balanced view; neither side carried enough edge.",
         )
     structured = MagicMock()
     structured.invoke.side_effect = lambda prompt: (
-        captured.__setitem__("prompt", prompt) or decision
+        captured.__setitem__("prompt", prompt) or verdict
     )
     llm = MagicMock()
     llm.with_structured_output.return_value = structured
@@ -667,10 +651,10 @@ class TestDeferredReflection:
 
 
 # ---------------------------------------------------------------------------
-# Portfolio Manager injection: past_context in state and prompt
+# Critic Manager injection: past_context in state and prompt
 # ---------------------------------------------------------------------------
 
-class TestPortfolioManagerInjection:
+class TestCriticManagerInjection:
 
     # past_context in initial state
 
@@ -685,59 +669,55 @@ class TestPortfolioManagerInjection:
         state = propagator.create_initial_state("NVDA", "2026-01-10")
         assert state["past_context"] == ""
 
-    # PM prompt
+    # Critic Manager prompt
 
-    def test_pm_prompt_includes_past_context(self):
+    def test_critic_prompt_includes_past_context(self):
         captured = {}
-        llm = _structured_pm_llm(captured)
-        pm_node = create_portfolio_manager(llm)
-        state = _make_pm_state(past_context="[2026-01-05 | NVDA | Buy | +5.0% | +2.0% | 5d]\nGreat call.")
-        pm_node(state)
+        llm = _structured_critic_llm(captured)
+        critic_node = create_critic_manager(llm)
+        state = _make_critic_state(past_context="[2026-01-05 | NVDA | Buy | +5.0% | +2.0% | 5d]\nGreat call.")
+        critic_node(state)
         assert "Lessons from prior decisions and outcomes" in captured["prompt"]
         assert "Great call." in captured["prompt"]
 
-    def test_pm_no_past_context_no_section(self):
-        """PM prompt omits the lessons section entirely when past_context is empty."""
+    def test_critic_no_past_context_no_section(self):
+        """Critic prompt omits the lessons section entirely when past_context is empty."""
         captured = {}
-        llm = _structured_pm_llm(captured)
-        pm_node = create_portfolio_manager(llm)
-        state = _make_pm_state(past_context="")
-        pm_node(state)
+        llm = _structured_critic_llm(captured)
+        critic_node = create_critic_manager(llm)
+        state = _make_critic_state(past_context="")
+        critic_node(state)
         assert "Lessons from prior decisions" not in captured["prompt"]
 
-    def test_pm_returns_rendered_markdown_with_rating(self):
-        """The structured PortfolioDecision is rendered to markdown that
-        downstream consumers (memory log, signal processor, CLI display)
-        can parse without any extra LLM call."""
+    def test_critic_returns_rendered_markdown_with_rating(self):
+        """The structured CriticVerdict is rendered to markdown that
+        downstream consumers (Trader, Risk Manager) can parse without any
+        extra LLM call."""
         captured = {}
-        decision = PortfolioDecision(
+        verdict = CriticVerdict(
+            verdict="Downgrade",
             rating=PortfolioRating.OVERWEIGHT,
-            executive_summary="Build position gradually over the next two weeks.",
-            investment_thesis="AI capex cycle remains intact; institutional flows constructive.",
-            price_target=215.0,
-            time_horizon="3-6 months",
+            critique="Edge is real but weaker than the Buy conviction claimed.",
         )
-        llm = _structured_pm_llm(captured, decision)
-        pm_node = create_portfolio_manager(llm)
-        result = pm_node(_make_pm_state())
-        md = result["final_trade_decision"]
+        llm = _structured_critic_llm(captured, verdict)
+        critic_node = create_critic_manager(llm)
+        result = critic_node(_make_critic_state())
+        md = result["critic_review"]
+        assert "**Verdict**: Downgrade" in md
         assert "**Rating**: Overweight" in md
-        assert "**Executive Summary**: Build position gradually" in md
-        assert "**Investment Thesis**: AI capex cycle" in md
-        assert "**Price Target**: 215.0" in md
-        assert "**Time Horizon**: 3-6 months" in md
+        assert "**Critique**: Edge is real but weaker" in md
 
-    def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
+    def test_critic_falls_back_to_freetext_when_structured_unavailable(self):
         """If a provider does not support with_structured_output, the agent
         falls back to a plain invoke and returns whatever prose the model
         produced, so the pipeline never blocks."""
-        plain_response = "**Rating**: Sell\n\nExit ahead of guidance."
+        plain_response = "**Verdict**: Veto\n\n**Rating**: Hold\n\nNot worth the risk."
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain_response)
-        pm_node = create_portfolio_manager(llm)
-        result = pm_node(_make_pm_state())
-        assert result["final_trade_decision"] == plain_response
+        critic_node = create_critic_manager(llm)
+        result = critic_node(_make_critic_state())
+        assert result["critic_review"] == plain_response
 
     # get_past_context ordering and limits
 
@@ -818,12 +798,12 @@ class TestLegacyRemoval:
         """TradingAgentsGraph must not expose reflect_and_remember."""
         assert not hasattr(TradingAgentsGraph, "reflect_and_remember")
 
-    def test_portfolio_manager_no_memory_param(self):
-        """create_portfolio_manager accepts only llm; passing memory= raises TypeError."""
+    def test_critic_manager_no_memory_param(self):
+        """create_critic_manager accepts only llm; passing memory= raises TypeError."""
         mock_llm = MagicMock()
-        create_portfolio_manager(mock_llm)
+        create_critic_manager(mock_llm)
         with pytest.raises(TypeError):
-            create_portfolio_manager(mock_llm, memory=MagicMock())
+            create_critic_manager(mock_llm, memory=MagicMock())
 
     def test_full_pipeline_no_regression(self, tmp_path):
         """propagate() completes and stores the decision after the redesign."""
@@ -836,19 +816,9 @@ class TestLegacyRemoval:
             "market_report": "",
             "sentiment_report": "",
             "news_report": "",
-            "fundamentals_report": "",
-            "investment_debate_state": {
-                "bull_history": "", "bear_history": "", "history": "",
-                "current_response": "", "judge_decision": "",
-            },
-            "investment_plan": "",
+            "signal_decision": "",
+            "critic_review": "",
             "trader_investment_plan": "",
-            "risk_debate_state": {
-                "aggressive_history": "", "conservative_history": "",
-                "neutral_history": "", "history": "", "judge_decision": "",
-                "current_aggressive_response": "", "current_conservative_response": "",
-                "current_neutral_response": "", "count": 1, "latest_speaker": "",
-            },
         }
         mock_graph = MagicMock()
         mock_graph.memory_log = TradingMemoryLog({"memory_log_path": str(tmp_path / "mem.md")})

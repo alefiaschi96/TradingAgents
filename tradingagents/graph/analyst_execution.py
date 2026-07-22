@@ -44,13 +44,6 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         tool_node="tools_news",
         report_key="news_report",
     ),
-    "fundamentals": AnalystNodeSpec(
-        key="fundamentals",
-        agent_node="Fundamentals Analyst",
-        clear_node="Msg Clear Fundamentals",
-        tool_node="tools_fundamentals",
-        report_key="fundamentals_report",
-    ),
 }
 
 

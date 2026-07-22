@@ -25,18 +25,21 @@ def create_trader(llm):
     def trader_node(state, name):
         company_name = state["company_of_interest"]
         instrument_context = get_instrument_context_from_state(state)
-        investment_plan = state["investment_plan"]
+        critic_review = state["critic_review"]
 
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are a trading agent analyzing market data to make investment decisions. "
-                    "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
-                    "Anchor your reasoning in the analysts' reports and the research plan. "
-                    "The system enters at MARKET and brackets every position with an automatic "
-                    "volatility-based stop and take-profit, so focus on direction and conviction "
-                    "rather than precise entry or stop levels the system will not use."
+                    "You are a trading agent on an intraday crypto-perpetual desk. "
+                    "Based on the critic-reviewed signal below, decide whether to "
+                    "Buy, Sell, or Hold. Anchor your reasoning in the analysts' "
+                    "reports and the critic's review — do not second-guess the "
+                    "direction the critic already scrutinized. "
+                    "The Risk Manager computes the exact stop-loss, take-profit, "
+                    "and position size deterministically from ATR after you decide, "
+                    "so focus only on direction and conviction, not entry/stop "
+                    "levels or sizing."
                     + get_language_instruction()
                     + get_horizon_instruction()
                     + get_scenario_instruction()
@@ -45,15 +48,16 @@ def create_trader(llm):
             {
                 "role": "user",
                 "content": (
-                    f"Based on a comprehensive analysis by a team of analysts, here is an investment "
-                    f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
-                    f"the analysts' intraday technical read and any fresh catalysts. "
-                    f"Use this plan as a foundation for evaluating your next "
-                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
+                    f"Here is the critic-reviewed signal for {company_name}. "
+                    f"{instrument_context} It incorporates the analysts' intraday "
+                    f"technical read, any fresh catalysts, and a critique of "
+                    f"whether the move is genuinely worth trading.\n\n"
+                    f"Critic-Reviewed Signal: {critic_review}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),
             },
         ]
+
 
         trader_plan = invoke_structured_or_freetext(
             structured_llm,

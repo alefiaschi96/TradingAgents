@@ -86,8 +86,6 @@ def build_config(cfg) -> dict:
     config["deep_think_llm"] = cfg.deep_model
     config["quick_think_llm"] = cfg.quick_model
     config["temperature"] = cfg.temperature
-    config["max_debate_rounds"] = cfg.debate_rounds
-    config["max_risk_discuss_rounds"] = cfg.debate_rounds
     if cfg.google_thinking_level:
         config["google_thinking_level"] = cfg.google_thinking_level
 
@@ -232,23 +230,17 @@ def reasoning_from_state(state: dict | None) -> dict:
 
     The full chain is otherwise discarded after ``run_analysis`` returns and
     only printed to stdout, so old runs aren't analysable. This captures, per
-    decision: the market + news reports, the bull/bear case and the research
-    manager's verdict, the trader's proposal, the three risk debaters, and the
-    Portfolio Manager's final decision. Every field is best-effort — a partial
-    state (e.g. after an error) just yields empty strings, never raises.
+    decision: the market + news reports, the Signal Synthesizer's call, the
+    Critic Manager's review, the trader's proposal, and the Risk Manager's
+    final decision. Every field is best-effort — a partial state (e.g. after
+    an error) just yields empty strings, never raises.
     """
     state = state or {}
-    debate = state.get("investment_debate_state") or {}
-    risk = state.get("risk_debate_state") or {}
     return {
         "market_report": state.get("market_report", ""),
         "news_report": state.get("news_report", ""),
-        "bull_case": debate.get("bull_history", ""),
-        "bear_case": debate.get("bear_history", ""),
-        "research_manager_plan": state.get("investment_plan", ""),
+        "signal_decision": state.get("signal_decision", ""),
+        "critic_review": state.get("critic_review", ""),
         "trader_proposal": state.get("trader_investment_plan", ""),
-        "risk_aggressive": risk.get("aggressive_history", ""),
-        "risk_conservative": risk.get("conservative_history", ""),
-        "risk_neutral": risk.get("neutral_history", ""),
-        "pm_decision": state.get("final_trade_decision", ""),
+        "risk_manager_decision": state.get("final_trade_decision", ""),
     }

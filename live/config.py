@@ -106,7 +106,6 @@ class Config:
     deep_model: str
     quick_model: str
     temperature: float
-    debate_rounds: int
     analysts: tuple[str, ...]
     google_thinking_level: str       # "" leaves the model default; "low"/"high" tune latency
     analysis_max_attempts: int       # retries on transient network drops during analysis
@@ -168,7 +167,6 @@ class Config:
             deep_model=_s("DEEP_MODEL", "gemini-2.5-pro"),
             quick_model=_s("QUICK_MODEL", "gemini-2.5-flash"),
             temperature=_f("TEMPERATURE", 0.0),
-            debate_rounds=_i("DEBATE_ROUNDS", 1),
             analysts=analysts,
             google_thinking_level=_s("GOOGLE_THINKING_LEVEL", ""),
             analysis_max_attempts=_i("ANALYSIS_MAX_ATTEMPTS", 3),

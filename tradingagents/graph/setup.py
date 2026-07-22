@@ -7,18 +7,13 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from tradingagents.agents import (
-    create_aggressive_debator,
-    create_bear_researcher,
-    create_bull_researcher,
-    create_conservative_debator,
-    create_fundamentals_analyst,
+    create_critic_manager,
     create_market_analyst,
     create_msg_delete,
-    create_neutral_debator,
     create_news_analyst,
-    create_portfolio_manager,
-    create_research_manager,
+    create_risk_manager,
     create_sentiment_analyst,
+    create_signal_synthesizer,
     create_trader,
 )
 from tradingagents.agents.utils.agent_states import AgentState
@@ -96,9 +91,7 @@ class GraphSetup:
         self.conditional_logic = conditional_logic
         self.analyst_concurrency_limit = analyst_concurrency_limit
 
-    def setup_graph(
-        self, selected_analysts=("market", "social", "news", "fundamentals")
-    ):
+    def setup_graph(self, selected_analysts=("market", "social", "news")):
         """Set up and compile the agent workflow graph.
 
         Args:
@@ -106,7 +99,6 @@ class GraphSetup:
                 - "market": Market analyst
                 - "social": Social media analyst
                 - "news": News analyst
-                - "fundamentals": Fundamentals analyst
         """
         plan = build_analyst_execution_plan(
             selected_analysts,
@@ -117,20 +109,13 @@ class GraphSetup:
             "market": lambda: create_market_analyst(self.quick_thinking_llm),
             "social": lambda: create_sentiment_analyst(self.quick_thinking_llm),
             "news": lambda: create_news_analyst(self.quick_thinking_llm),
-            "fundamentals": lambda: create_fundamentals_analyst(self.quick_thinking_llm),
         }
 
-        # Create researcher and manager nodes
-        bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
-        bear_researcher_node = create_bear_researcher(self.quick_thinking_llm)
-        research_manager_node = create_research_manager(self.deep_thinking_llm)
+        # Create the single-pass decision pipeline nodes: no debate rounds.
+        signal_synthesizer_node = create_signal_synthesizer(self.deep_thinking_llm)
+        critic_manager_node = create_critic_manager(self.deep_thinking_llm)
         trader_node = create_trader(self.quick_thinking_llm)
-
-        # Create risk analysis nodes
-        aggressive_analyst = create_aggressive_debator(self.quick_thinking_llm)
-        neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
-        conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
-        portfolio_manager_node = create_portfolio_manager(self.deep_thinking_llm)
+        risk_manager_node = create_risk_manager(self.deep_thinking_llm)
 
         # Create workflow
         workflow = StateGraph(AgentState)
@@ -141,15 +126,11 @@ class GraphSetup:
             workflow.add_node(spec.clear_node, create_msg_delete())
             workflow.add_node(spec.tool_node, self.tool_nodes[spec.key])
 
-        # Add other nodes
-        workflow.add_node("Bull Researcher", bull_researcher_node)
-        workflow.add_node("Bear Researcher", bear_researcher_node)
-        workflow.add_node("Research Manager", research_manager_node)
+        # Add decision pipeline nodes
+        workflow.add_node("Signal Synthesizer", signal_synthesizer_node)
+        workflow.add_node("Critic Manager", critic_manager_node)
         workflow.add_node("Trader", trader_node)
-        workflow.add_node("Aggressive Analyst", aggressive_analyst)
-        workflow.add_node("Neutral Analyst", neutral_analyst)
-        workflow.add_node("Conservative Analyst", conservative_analyst)
-        workflow.add_node("Portfolio Manager", portfolio_manager_node)
+        workflow.add_node("Risk Manager", risk_manager_node)
 
         # Define edges
         # Start with the first analyst
@@ -178,11 +159,12 @@ class GraphSetup:
             )
             workflow.add_edge(current_tools, current_analyst)
 
-            # Connect to next analyst or to Bull Researcher if this is the last analyst
+            # Connect to next analyst or to the Signal Synthesizer if this is
+            # the last analyst
             next_node = (
                 plan.specs[i + 1].agent_node
                 if i < len(plan.specs) - 1
-                else "Bull Researcher"
+                else "Signal Synthesizer"
             )
             if spec.key == "market":
                 # The market report is final once its tool loop ends (the clear
@@ -195,50 +177,10 @@ class GraphSetup:
             else:
                 workflow.add_edge(current_clear, next_node)
 
-        # Add remaining edges
-        workflow.add_conditional_edges(
-            "Bull Researcher",
-            self.conditional_logic.should_continue_debate,
-            {
-                "Bear Researcher": "Bear Researcher",
-                "Research Manager": "Research Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Bear Researcher",
-            self.conditional_logic.should_continue_debate,
-            {
-                "Bull Researcher": "Bull Researcher",
-                "Research Manager": "Research Manager",
-            },
-        )
-        workflow.add_edge("Research Manager", "Trader")
-        workflow.add_edge("Trader", "Aggressive Analyst")
-        workflow.add_conditional_edges(
-            "Aggressive Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Conservative Analyst": "Conservative Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Conservative Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Neutral Analyst": "Neutral Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Neutral Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Aggressive Analyst": "Aggressive Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
-
-        workflow.add_edge("Portfolio Manager", END)
+        # Single-pass decision pipeline: no debate/discussion loops.
+        workflow.add_edge("Signal Synthesizer", "Critic Manager")
+        workflow.add_edge("Critic Manager", "Trader")
+        workflow.add_edge("Trader", "Risk Manager")
+        workflow.add_edge("Risk Manager", END)
 
         return workflow

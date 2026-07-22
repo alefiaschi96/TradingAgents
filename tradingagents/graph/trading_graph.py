@@ -13,11 +13,7 @@ from langgraph.prebuilt import ToolNode
 # Import the abstract tool methods from agent_utils
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
-    get_balance_sheet,
-    get_cashflow,
-    get_fundamentals,
     get_global_news,
-    get_income_statement,
     get_indicators,
     get_insider_transactions,
     get_macro_indicators,
@@ -55,7 +51,7 @@ class TradingAgentsGraph:
 
     def __init__(
         self,
-        selected_analysts=("market", "social", "news", "fundamentals"),
+        selected_analysts=("market", "social", "news"),
         debug=False,
         config: dict[str, Any] = None,
         callbacks: list | None = None,
@@ -108,10 +104,7 @@ class TradingAgentsGraph:
         self.tool_nodes = self._create_tool_nodes()
 
         # Initialize components
-        self.conditional_logic = ConditionalLogic(
-            max_debate_rounds=self.config["max_debate_rounds"],
-            max_risk_discuss_rounds=self.config["max_risk_discuss_rounds"],
-        )
+        self.conditional_logic = ConditionalLogic()
         self.graph_setup = GraphSetup(
             self.quick_thinking_llm,
             self.deep_thinking_llm,
@@ -206,15 +199,6 @@ class TradingAgentsGraph:
                     get_insider_transactions,
                     get_macro_indicators,
                     get_prediction_markets,
-                ]
-            ),
-            "fundamentals": ToolNode(
-                [
-                    # Fundamental analysis tools
-                    get_fundamentals,
-                    get_balance_sheet,
-                    get_cashflow,
-                    get_income_statement,
                 ]
             ),
         }
@@ -443,31 +427,15 @@ class TradingAgentsGraph:
         lacks the downstream keys (trader plan, debates, PM decision), and
         logging must never crash the run over a missing one.
         """
-        debate = final_state.get("investment_debate_state") or {}
-        risk = final_state.get("risk_debate_state") or {}
         self.log_states_dict[str(trade_date)] = {
             "company_of_interest": final_state.get("company_of_interest", ""),
             "trade_date": final_state.get("trade_date", ""),
             "market_report": final_state.get("market_report", ""),
             "sentiment_report": final_state.get("sentiment_report", ""),
             "news_report": final_state.get("news_report", ""),
-            "fundamentals_report": final_state.get("fundamentals_report", ""),
-            "investment_debate_state": {
-                "bull_history": debate.get("bull_history", ""),
-                "bear_history": debate.get("bear_history", ""),
-                "history": debate.get("history", ""),
-                "current_response": debate.get("current_response", ""),
-                "judge_decision": debate.get("judge_decision", ""),
-            },
+            "signal_decision": final_state.get("signal_decision", ""),
+            "critic_review": final_state.get("critic_review", ""),
             "trader_investment_decision": final_state.get("trader_investment_plan", ""),
-            "risk_debate_state": {
-                "aggressive_history": risk.get("aggressive_history", ""),
-                "conservative_history": risk.get("conservative_history", ""),
-                "neutral_history": risk.get("neutral_history", ""),
-                "history": risk.get("history", ""),
-                "judge_decision": risk.get("judge_decision", ""),
-            },
-            "investment_plan": final_state.get("investment_plan", ""),
             "final_trade_decision": final_state.get("final_trade_decision", ""),
         }
 

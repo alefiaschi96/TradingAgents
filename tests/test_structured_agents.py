@@ -1,10 +1,11 @@
-"""Tests for structured-output agents (Trader, Research Manager, Sentiment Analyst).
+"""Tests for structured-output agents (Signal Synthesizer, Critic Manager, Trader, Sentiment Analyst).
 
-The Portfolio Manager has its own coverage in tests/test_memory_log.py
-(which exercises the full memory-log → PM injection cycle).  This file
-covers the parallel schemas, render functions, and graceful-fallback
-behavior we added for the Trader, Research Manager, and Sentiment Analyst
-so they share the same deterministic output shape.
+The Risk Manager has its own coverage in tests/test_memory_log.py (Critic
+Manager's past_context injection) and exercises get_sl_tp_levels directly
+elsewhere. This file covers the schemas, render functions, and
+graceful-fallback behavior shared by the Signal Synthesizer, Critic Manager,
+Trader, and Sentiment Analyst so they share the same deterministic output
+shape.
 """
 
 from unittest.mock import MagicMock
@@ -13,16 +14,19 @@ import pytest
 from pydantic import ValidationError
 
 from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
-from tradingagents.agents.managers.research_manager import create_research_manager
+from tradingagents.agents.decision.critic_manager import create_critic_manager
+from tradingagents.agents.decision.signal_synthesizer import create_signal_synthesizer
 from tradingagents.agents.schemas import (
+    CriticVerdict,
     PortfolioRating,
-    ResearchPlan,
     SentimentBand,
     SentimentReport,
+    SignalDecision,
     TraderAction,
     TraderProposal,
-    render_research_plan,
+    render_critic_verdict,
     render_sentiment_report,
+    render_signal_decision,
     render_trader_proposal,
 )
 from tradingagents.agents.trader.trader import create_trader
@@ -43,52 +47,12 @@ class TestRenderTraderProposal:
         # analyst stop-signal text and any external code that greps for it.
         assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in md
 
-    def test_optional_fields_included_when_present(self):
-        p = TraderProposal(
-            action=TraderAction.BUY,
-            reasoning="Strong technicals + fundamentals.",
-            entry_price=189.5,
-            stop_loss=178.0,
-            position_sizing="6% of portfolio",
-        )
-        md = render_trader_proposal(p)
-        assert "**Action**: Buy" in md
-        assert "**Entry Price**: 189.5" in md
-        assert "**Stop Loss**: 178.0" in md
-        assert "**Position Sizing**: 6% of portfolio" in md
-        assert "FINAL TRANSACTION PROPOSAL: **BUY**" in md
-
-    def test_optional_fields_omitted_when_absent(self):
-        p = TraderProposal(action=TraderAction.SELL, reasoning="Guidance cut.")
-        md = render_trader_proposal(p)
-        assert "Entry Price" not in md
-        assert "Stop Loss" not in md
-        assert "Position Sizing" not in md
-        assert "FINAL TRANSACTION PROPOSAL: **SELL**" in md
-
-
-@pytest.mark.unit
-class TestRenderResearchPlan:
-    def test_required_fields(self):
-        p = ResearchPlan(
-            recommendation=PortfolioRating.OVERWEIGHT,
-            rationale="Bull case carried; tailwinds intact.",
-            strategic_actions="Build position over two weeks; cap at 5%.",
-        )
-        md = render_research_plan(p)
-        assert "**Recommendation**: Overweight" in md
-        assert "**Rationale**: Bull case carried" in md
-        assert "**Strategic Actions**: Build position" in md
-
-    def test_all_5_tier_ratings_render(self):
-        for rating in PortfolioRating:
-            p = ResearchPlan(
-                recommendation=rating,
-                rationale="r",
-                strategic_actions="s",
-            )
-            md = render_research_plan(p)
-            assert f"**Recommendation**: {rating.value}" in md
+    def test_buy_and_sell_render(self):
+        for action in (TraderAction.BUY, TraderAction.SELL):
+            p = TraderProposal(action=action, reasoning="Some reasoning.")
+            md = render_trader_proposal(p)
+            assert f"**Action**: {action.value}" in md
+            assert f"FINAL TRANSACTION PROPOSAL: **{action.value.upper()}**" in md
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +63,7 @@ class TestRenderResearchPlan:
 def _make_trader_state():
     return {
         "company_of_interest": "NVDA",
-        "investment_plan": "**Recommendation**: Buy\n**Rationale**: ...\n**Strategic Actions**: ...",
+        "critic_review": "**Verdict**: Approve\n\n**Rating**: Buy\n\n**Critique**: ...",
     }
 
 
@@ -128,28 +92,24 @@ class TestTraderAgent:
         proposal = TraderProposal(
             action=TraderAction.BUY,
             reasoning="AI capex cycle intact; institutional flows constructive.",
-            entry_price=189.5,
-            stop_loss=178.0,
-            position_sizing="6% of portfolio",
         )
         llm = _structured_trader_llm(captured, proposal)
         trader = create_trader(llm)
         result = trader(_make_trader_state())
         plan = result["trader_investment_plan"]
         assert "**Action**: Buy" in plan
-        assert "**Entry Price**: 189.5" in plan
         assert "FINAL TRANSACTION PROPOSAL: **BUY**" in plan
         # The same rendered markdown is also added to messages for downstream agents.
         assert plan in result["messages"][0].content
 
-    def test_prompt_includes_investment_plan(self):
+    def test_prompt_includes_critic_review(self):
         captured = {}
         llm = _structured_trader_llm(captured)
         trader = create_trader(llm)
         trader(_make_trader_state())
-        # The investment plan is in the user message of the captured prompt.
+        # The critic-reviewed signal is in the user message of the captured prompt.
         prompt = captured["prompt"]
-        assert any("Proposed Investment Plan" in m["content"] for m in prompt)
+        assert any("Critic-Reviewed Signal" in m["content"] for m in prompt)
 
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain_response = (
@@ -165,34 +125,29 @@ class TestTraderAgent:
 
 
 # ---------------------------------------------------------------------------
-# Research Manager agent: structured happy path + fallback
+# Signal Synthesizer agent: structured happy path + fallback
 # ---------------------------------------------------------------------------
 
 
-def _make_rm_state():
+def _make_synth_state():
     return {
         "company_of_interest": "NVDA",
-        "investment_debate_state": {
-            "history": "Bull and bear arguments here.",
-            "bull_history": "Bull says...",
-            "bear_history": "Bear says...",
-            "current_response": "",
-            "judge_decision": "",
-            "count": 1,
-        },
+        "market_report": "Market report.",
+        "sentiment_report": "Sentiment report.",
+        "news_report": "News report.",
     }
 
 
-def _structured_rm_llm(captured: dict, plan: ResearchPlan | None = None):
-    if plan is None:
-        plan = ResearchPlan(
-            recommendation=PortfolioRating.HOLD,
-            rationale="Balanced view across both sides.",
-            strategic_actions="Hold current position; reassess after earnings.",
+def _structured_synth_llm(captured: dict, decision: SignalDecision | None = None):
+    if decision is None:
+        decision = SignalDecision(
+            rating=PortfolioRating.HOLD,
+            rationale="Balanced view across sources.",
+            key_evidence="No strong agreement across analysts.",
         )
     structured = MagicMock()
     structured.invoke.side_effect = lambda prompt: (
-        captured.__setitem__("prompt", prompt) or plan
+        captured.__setitem__("prompt", prompt) or decision
     )
     llm = MagicMock()
     llm.with_structured_output.return_value = structured
@@ -200,40 +155,108 @@ def _structured_rm_llm(captured: dict, plan: ResearchPlan | None = None):
 
 
 @pytest.mark.unit
-class TestResearchManagerAgent:
+class TestRenderSignalDecision:
+    def test_required_fields(self):
+        d = SignalDecision(
+            rating=PortfolioRating.OVERWEIGHT,
+            rationale="Bull evidence carried; tailwinds intact.",
+            key_evidence="Price above VWAP; funding crowded short.",
+        )
+        md = render_signal_decision(d)
+        assert "**Rating**: Overweight" in md
+        assert "**Rationale**: Bull evidence carried" in md
+        assert "**Key Evidence**: Price above VWAP" in md
+
+    def test_all_5_tier_ratings_render(self):
+        for rating in PortfolioRating:
+            d = SignalDecision(rating=rating, rationale="r", key_evidence="e")
+            md = render_signal_decision(d)
+            assert f"**Rating**: {rating.value}" in md
+
+
+@pytest.mark.unit
+class TestSignalSynthesizerAgent:
     def test_structured_path_produces_rendered_markdown(self):
         captured = {}
-        plan = ResearchPlan(
-            recommendation=PortfolioRating.OVERWEIGHT,
-            rationale="Bull case is stronger; AI tailwind intact.",
-            strategic_actions="Build position gradually over two weeks.",
+        decision = SignalDecision(
+            rating=PortfolioRating.OVERWEIGHT,
+            rationale="Bull case is stronger; momentum intact.",
+            key_evidence="EMA9 > EMA21; funding crowded short.",
         )
-        llm = _structured_rm_llm(captured, plan)
-        rm = create_research_manager(llm)
-        result = rm(_make_rm_state())
-        ip = result["investment_plan"]
-        assert "**Recommendation**: Overweight" in ip
-        assert "**Rationale**: Bull case" in ip
-        assert "**Strategic Actions**: Build position" in ip
+        llm = _structured_synth_llm(captured, decision)
+        synth = create_signal_synthesizer(llm)
+        result = synth(_make_synth_state())
+        sd = result["signal_decision"]
+        assert "**Rating**: Overweight" in sd
+        assert "**Rationale**: Bull case" in sd
+        assert "**Key Evidence**: EMA9" in sd
 
     def test_prompt_uses_5_tier_rating_scale(self):
-        """The RM prompt must list all five tiers so the schema enum matches user expectations."""
         captured = {}
-        llm = _structured_rm_llm(captured)
-        rm = create_research_manager(llm)
-        rm(_make_rm_state())
+        llm = _structured_synth_llm(captured)
+        synth = create_signal_synthesizer(llm)
+        synth(_make_synth_state())
         prompt = captured["prompt"]
         for tier in ("Buy", "Overweight", "Hold", "Underweight", "Sell"):
             assert f"**{tier}**" in prompt, f"missing {tier} in prompt"
 
     def test_falls_back_to_freetext_when_structured_unavailable(self):
-        plain_response = "**Recommendation**: Sell\n\n**Rationale**: ...\n\n**Strategic Actions**: ..."
+        plain_response = "**Rating**: Sell\n\n**Rationale**: ...\n\n**Key Evidence**: ..."
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain_response)
-        rm = create_research_manager(llm)
-        result = rm(_make_rm_state())
-        assert result["investment_plan"] == plain_response
+        synth = create_signal_synthesizer(llm)
+        result = synth(_make_synth_state())
+        assert result["signal_decision"] == plain_response
+
+
+# ---------------------------------------------------------------------------
+# Critic Manager agent: render function + structured happy path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRenderCriticVerdict:
+    def test_required_fields(self):
+        v = CriticVerdict(
+            verdict="Downgrade",
+            rating=PortfolioRating.OVERWEIGHT,
+            critique="Edge is real but weaker than the Buy conviction claimed.",
+        )
+        md = render_critic_verdict(v)
+        assert "**Verdict**: Downgrade" in md
+        assert "**Rating**: Overweight" in md
+        assert "**Critique**: Edge is real" in md
+
+
+def _make_critic_state():
+    return {
+        "company_of_interest": "NVDA",
+        "signal_decision": "**Rating**: Buy\n\n**Rationale**: ...\n\n**Key Evidence**: ...",
+        "past_context": "",
+    }
+
+
+@pytest.mark.unit
+class TestCriticManagerAgent:
+    def test_structured_path_produces_rendered_markdown(self):
+        captured = {}
+        verdict = CriticVerdict(
+            verdict="Approve",
+            rating=PortfolioRating.BUY,
+            critique="Multiple sources agree; edge exceeds noise.",
+        )
+        structured = MagicMock()
+        structured.invoke.side_effect = lambda prompt: (
+            captured.__setitem__("prompt", prompt) or verdict
+        )
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        critic = create_critic_manager(llm)
+        result = critic(_make_critic_state())
+        cr = result["critic_review"]
+        assert "**Verdict**: Approve" in cr
+        assert "**Rating**: Buy" in cr
 
 
 # ---------------------------------------------------------------------------

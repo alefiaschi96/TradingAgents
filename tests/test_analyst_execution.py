@@ -27,11 +27,11 @@ class AnalystExecutionPlanTests(unittest.TestCase):
             build_analyst_execution_plan(["market"], concurrency_limit=0)
 
     def test_get_initial_analyst_node_uses_plan_metadata(self):
-        plan = build_analyst_execution_plan(["fundamentals", "news"])
+        plan = build_analyst_execution_plan(["news", "market"])
 
         self.assertEqual(
             get_initial_analyst_node(plan),
-            "Fundamentals Analyst",
+            "News Analyst",
         )
 
     def test_social_key_displays_as_sentiment_analyst(self):

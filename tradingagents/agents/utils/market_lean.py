@@ -114,6 +114,38 @@ def market_analyst_lean(report: str) -> str:
     return "neutral"
 
 
+_COND_TRIGGER_RE = re.compile(
+    r"(?:re-?claim(?:s|ing|ed)?(?:\s+of)?|clears?|closes?\s+(?:above|below)|"
+    r"break(?:s|ing)?\s+(?:above|below|over|of)?|accept(?:s|ance)?\s+above|"
+    r"hold(?:s|ing)?\s+above|reject(?:s|ion)?\s+(?:of|at|near)|"
+    r"pull\s?back\s+(?:toward|into|to))"
+    r"[\s:\-]*\**\s*[~≈]?\$?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)",
+    re.I,
+)
+
+
+def conditional_trigger_levels(report: str) -> list[float]:
+    """Price levels the analyst names as would-change-my-mind triggers.
+
+    A neutral report often carries an actionable condition in prose —
+    "avoid new longs unless ETH reclaims 1898–1900", "wait for a pullback
+    toward 1912" (observed verbatim in the July 2026 paper-sim logs). Under
+    the conditional-entry executor those ARE tradeable plans, so the market
+    gate can choose to let such a report continue to the debate/PM instead
+    of short-circuiting. Pure text parse: deduped levels in citation order,
+    [] when the report names none (the gate then behaves exactly as before).
+    """
+    out: list[float] = []
+    for m in _COND_TRIGGER_RE.finditer(report or ""):
+        try:
+            value = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if value > 0 and value not in out:
+            out.append(value)
+    return out
+
+
 def market_gate_shortcut_reason(report: str) -> str | None:
     """Why the pipeline should stop right after the market analyst, or None.
 

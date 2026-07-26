@@ -145,6 +145,12 @@ def build_config(cfg) -> dict:
         # the same execution_plan contract and the executor park them as
         # resting orders. Only meaningful with structural_sl on.
         config["entry_mode"] = os.environ.get("ENTRY_MODE", "market").strip().lower()
+        # Conditional holds: a HOLD report naming a nearby trigger level keeps
+        # the pipeline running so the PM can park it as an entry leg. Only
+        # meaningful with entry_mode="plan"; the ATR cap bounds the extra
+        # pipeline runs it can cause.
+        config["conditional_holds"] = os.environ.get("CONDITIONAL_HOLDS", "0") == "1"
+        config["conditional_max_atr"] = float(os.environ.get("CONDITIONAL_MAX_ATR", "2.0"))
         # Placeholder; run_analysis fills this with the live regime read just
         # before building the graph (kept here so the key always exists).
         config["regime_context"] = ""

@@ -192,6 +192,11 @@ services:
       REGIME_EXIT_CHECK: "1"
       MIN_ANALYST_RR: "1.5"
       STRUCTURAL_SL: "1"
+      # A/B vs hype-struct: SOL parks the PM's OCO entry legs instead of
+      # entering at market, and near-trigger HOLDs reach the PM.
+      ENTRY_MODE: "plan"
+      ENTRY_TTL_MIN: "120"
+      CONDITIONAL_HOLDS: "1"
 
   sol-struct-dashboard:
     <<: *dashboard

@@ -193,6 +193,33 @@ def get_scenario_instruction() -> str:
         else ""
     )
 
+    # Conditional OCO entries: the desk does not have to enter at the current
+    # price — but ONLY the entry side executes on touch; exits keep the stop
+    # contract's dual-track semantics above.
+    entry_rule = (
+        " ENTRY EXECUTION: you do NOT have to enter at the current price. "
+        "Declare up to two entry_legs in the execution_plan — a pullback "
+        "(resting limit inside a retracement zone expected to hold) and/or a "
+        "breakout (stop-entry beyond a trigger) — executed OCO: the first "
+        "condition to trigger opens the position, the other leg is cancelled, "
+        "and the whole plan expires unfilled after its window (bounded by "
+        "your horizon_minutes). Entry levels execute on TOUCH, wicks "
+        "included — a wick into the zone fills the limit, a wick through the "
+        "trigger fires the stop-entry. Exits are NOT touch-based: once "
+        "filled, the position lives under the stop contract exactly as "
+        "declared above. Name levels a meaningful distance from the current "
+        "price (roughly 0.75-3 ATR): nearer is executed as a market entry "
+        "anyway, farther is unreachable and dropped. Each leg may carry its "
+        "own price_target and invalidation_level override so its geometry "
+        "prices its own scenario — a breakout's invalidation is usually a "
+        "failure back under the broken level, not the pullback zone's floor. "
+        "Omit entry_legs only when entering NOW at market is genuinely the "
+        "intended execution."
+        if config.get("structural_sl")
+        and str(config.get("entry_mode", "")).lower() == "plan"
+        else ""
+    )
+
     scenario = (
         f" SCENARIO: you trade a crypto PERPETUAL FUTURE{instrument}{lev_txt}, "
         f"intraday on {tf} bars, holding ~1-2 hours. {direction} FLAT is the "
@@ -200,8 +227,15 @@ def get_scenario_instruction() -> str:
         f"edge — never take a position just to be active. {sizing_txt} and "
         f"bracketed by a volatility-based stop and a take-profit "
         f"at {rr_txt} the stop distance, {exit_txt}; one position "
-        f"at a time.{target_rule}{structural_rule} Reason only from intraday "
-        f"price action and fresh catalysts."
+        f"at a time.{target_rule}{structural_rule}{entry_rule} Reason only "
+        f"from intraday price action and fresh catalysts. "
+        f"The market report may include futures positioning (funding rate, "
+        f"open interest, order-book imbalance): read extreme funding as "
+        f"crowding/squeeze risk against the crowded side, rising open "
+        f"interest as fresh money behind a move (falling OI = a move that "
+        f"may fade), and a bid/ask-skewed book as short-lived near-term "
+        f"pressure. When any of these reads 'data unavailable', weigh the "
+        f"missing confirmation explicitly instead of assuming it."
     )
 
     # Optional higher-timeframe regime read, injected as INFORMATION only. It

@@ -141,6 +141,10 @@ def build_config(cfg) -> dict:
         # (schema variant + scenario stop-contract text). Off = byte-identical
         # prompt and schema, so control-group profiles are untouched.
         config["structural_sl"] = os.environ.get("STRUCTURAL_SL", "0") == "1"
+        # Conditional OCO entries: "plan" makes the PM declare entry legs in
+        # the same execution_plan contract and the executor park them as
+        # resting orders. Only meaningful with structural_sl on.
+        config["entry_mode"] = os.environ.get("ENTRY_MODE", "market").strip().lower()
         # Placeholder; run_analysis fills this with the live regime read just
         # before building the graph (kept here so the key always exists).
         config["regime_context"] = ""

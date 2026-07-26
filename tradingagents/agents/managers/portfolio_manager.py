@@ -13,6 +13,7 @@ from __future__ import annotations
 from tradingagents.agents.schemas import (
     PortfolioDecision,
     PortfolioDecisionStructural,
+    PortfolioDecisionStructuralEntry,
     render_pm_decision,
 )
 from tradingagents.agents.utils.agent_utils import (
@@ -33,8 +34,17 @@ def create_portfolio_manager(llm):
     # module import free of config side effects.
     from tradingagents.dataflows.config import get_config
 
-    structural = bool(get_config().get("structural_sl"))
-    schema = PortfolioDecisionStructural if structural else PortfolioDecision
+    config = get_config()
+    structural = bool(config.get("structural_sl"))
+    # ENTRY_MODE=plan (with structural on) adds the conditional entry legs to
+    # the same contract; structural-only profiles keep a byte-identical schema.
+    entry_plan = structural and str(config.get("entry_mode", "")).lower() == "plan"
+    if entry_plan:
+        schema = PortfolioDecisionStructuralEntry
+    elif structural:
+        schema = PortfolioDecisionStructural
+    else:
+        schema = PortfolioDecision
     structured_llm = bind_structured(llm, schema, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:

@@ -67,6 +67,12 @@ _HARD_BUFFER_ATR = 0.4       # default hard = soft + this x ATR x confirm_bars
 # structural shelf 1-2% away is many multiples of a shrunken 15m ATR.
 _HARD_ATR_RANGE = (0.2, 6.0)
 _HARD_GAP_FLOOR_ATR = 0.25   # min declared soft->hard gap, x ATR x confirm_bars
+# Accepted distance of an entry leg's level from the current price, in ATRs.
+# The floor is what makes the OCO a patience filter at all: on the July 2026
+# logs, legs within 0.5 ATR filled inside 15 minutes on every single trade
+# (chop oscillation), i.e. a market entry with extra steps. The ceiling drops
+# daydream levels the TTL could never reach.
+_LEG_ATR_RANGE = (0.75, 3.0)
 
 
 def parse_execution_plan(pm_decision: str) -> dict | None:
@@ -202,6 +208,129 @@ def resolve_structural_levels(
     }, None, False
 
 
+def normalize_entry_legs(raw) -> list[dict]:
+    """Typed entry legs out of the execution plan's ``entry_legs`` field. Pure.
+
+    Keeps at most one leg per kind (first usable wins, mirroring the OCO
+    contract) and silently drops malformed ones — a broken leg degrades the
+    plan, it never rejects the whole contract.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind not in ("pullback", "breakout") or kind in seen:
+            continue
+        leg = {"kind": kind, "zone_low": None, "zone_high": None,
+               "trigger": None, "price_target": None, "invalidation_level": None}
+        for field in ("zone_low", "zone_high", "trigger", "price_target",
+                      "invalidation_level"):
+            value = item.get(field)
+            if value is None:
+                continue
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                leg[field] = value
+        if kind == "pullback":
+            if leg["zone_low"] is None or leg["zone_high"] is None:
+                continue
+            leg["zone_low"], leg["zone_high"] = (
+                min(leg["zone_low"], leg["zone_high"]),
+                max(leg["zone_low"], leg["zone_high"]),
+            )
+        elif leg["trigger"] is None:
+            continue
+        seen.add(kind)
+        out.append(leg)
+    return out
+
+
+def validate_legs(
+    side: str, legs: list[dict], ref_price: float, atr: float | None
+) -> tuple[list[dict], list[str]]:
+    """Keep only legs whose geometry makes sense for this side. Pure.
+
+    A buy's pullback zone sits below the price and its breakout trigger
+    above (mirrored for a sell), and the leg's entry level must sit within
+    ``_LEG_ATR_RANGE`` ATRs of the price: nearer is a market entry with
+    extra steps, farther is unreachable inside any sane TTL.
+    Returns (valid_legs, reasons_for_dropped); never raises.
+    """
+    long = side == "buy"
+    valid: list[dict] = []
+    reasons: list[str] = []
+    lo, hi = _LEG_ATR_RANGE
+    for leg in legs:
+        if leg["kind"] == "pullback":
+            edge = leg["zone_high"] if long else leg["zone_low"]
+            on_side = edge < ref_price if long else edge > ref_price
+            if not on_side:
+                reasons.append(
+                    f"pullback zone {leg['zone_low']:g}-{leg['zone_high']:g} "
+                    f"not on the retracement side of price {ref_price:.6g}"
+                )
+                continue
+        else:
+            edge = leg["trigger"]
+            on_side = edge > ref_price if long else edge < ref_price
+            if not on_side:
+                reasons.append(
+                    f"breakout trigger {edge:g} not beyond price {ref_price:.6g}"
+                )
+                continue
+        if atr and atr > 0:
+            dist = abs(ref_price - edge)
+            if not lo * atr <= dist <= hi * atr:
+                reasons.append(
+                    f"{leg['kind']} level {edge:g} distance {dist:.6g} outside "
+                    f"[{lo:g}, {hi:g}]xATR ({atr:.6g})"
+                )
+                continue
+        valid.append(leg)
+    return valid, reasons
+
+
+def check_entry(side: str, legs: list[dict], o: float, h: float, low: float, c: float):
+    """Which pending leg (if any) does this 1m candle fill? Pure, testable.
+
+    A pullback leg fills at the near edge of its zone (a resting limit: no
+    adverse slippage); a breakout leg fills at its trigger (a stop-market:
+    the caller applies slippage). When one candle triggers both legs, its
+    direction decides which side of the range traded first: a rising candle
+    (close >= open) is assumed to have gone open->low->high, so the
+    retracement leg filled first; a falling candle the reverse.
+    Returns (leg, fill_price) or (None, None).
+    """
+    pull = next((leg for leg in legs if leg["kind"] == "pullback"), None)
+    brk = next((leg for leg in legs if leg["kind"] == "breakout"), None)
+    if side == "buy":
+        pull_hit = pull is not None and low <= pull["zone_high"]
+        brk_hit = brk is not None and h >= brk["trigger"]
+        pull_fill = pull["zone_high"] if pull else None
+        retrace_first = c >= o  # rising candle: open->low->high
+    else:
+        pull_hit = pull is not None and h >= pull["zone_low"]
+        brk_hit = brk is not None and low <= brk["trigger"]
+        pull_fill = pull["zone_low"] if pull else None
+        retrace_first = c <= o  # falling candle: open->high->low
+    if pull_hit and brk_hit:
+        if retrace_first:
+            return pull, pull_fill
+        return brk, brk["trigger"]
+    if pull_hit:
+        return pull, pull_fill
+    if brk_hit:
+        return brk, brk["trigger"]
+    return None, None
+
+
 def capped_tp(
     side: str, entry: float, tp_rr: float, analyst_target: float | None
 ) -> tuple[float, str]:
@@ -256,6 +385,8 @@ class PaperSimulator:
         regime_exit_check: bool = False,
         min_analyst_rr: float = 0.0,
         structural_sl: bool = False,
+        entry_mode: str = "market",
+        entry_ttl_min: float = 120.0,
     ):
         self.cfg = cfg
         self.state_path = state_path
@@ -298,6 +429,11 @@ class PaperSimulator:
         # touch) instead of the single ATR stop. Any invalid block falls back
         # to the ATR stop — never worse than today.
         self.structural_sl = structural_sl
+        # Conditional OCO entries: with "plan" (and structural_sl on), the
+        # PM's entry legs rest as pending conditional orders instead of an
+        # immediate market fill. "market" keeps today's behaviour exactly.
+        self.entry_mode = entry_mode
+        self.entry_ttl_min = entry_ttl_min
         self._spot_exchange = None  # lazy public spot client (basis ratio)
         self._pending_regime: str | None = None
         self._pending_count = 0
@@ -316,6 +452,7 @@ class PaperSimulator:
         return {
             "equity": start_equity,
             "open": None,
+            "pending": None,
             "closed": [],
             "last_decision_at": None,
             "wins": 0,
@@ -339,6 +476,8 @@ class PaperSimulator:
             raise ValueError("state['closed'] must be a list")
         if state["open"] is not None and not isinstance(state["open"], dict):
             raise ValueError("state['open'] must be an object or null")
+        if state["pending"] is not None and not isinstance(state["pending"], dict):
+            raise ValueError("state['pending'] must be an object or null")
 
         state["equity"] = float(state["equity"])
         state["wins"] = int(state["wins"])
@@ -415,6 +554,9 @@ class PaperSimulator:
     def has_open(self) -> bool:
         return self.state.get("open") is not None
 
+    def has_pending(self) -> bool:
+        return self.state.get("pending") is not None
+
     def decision_due(self, now_ts: float) -> bool:
         last = self.state.get("last_decision_at")
         return last is None or (now_ts - last) >= self.decision_interval
@@ -439,8 +581,8 @@ class PaperSimulator:
                 time.sleep(1.0 * (attempt + 1))
         raise last_err
 
-    def minute_range(self) -> tuple[float, float]:
-        """(high, low) of the latest 1m candle — catches intra-minute wicks.
+    def minute_candle(self) -> tuple[float, float, float, float]:
+        """(open, high, low, close) of the latest 1m candle.
 
         On a persistent fetch failure, fall back to the last price (a different,
         more reliable endpoint) as a point check rather than skipping the tick.
@@ -448,14 +590,19 @@ class PaperSimulator:
         try:
             ohlcv = self._fetch_ohlcv("1m", 2)
             last = ohlcv[-1]
-            return float(last[2]), float(last[3])
+            return (float(last[1]), float(last[2]), float(last[3]), float(last[4]))
         except Exception as e:  # noqa: BLE001 - all retries exhausted
             logger.warning(
-                "minute_range: 1m candle fetch failed (%s); "
+                "minute_candle: 1m candle fetch failed (%s); "
                 "falling back to last price for this tick", e,
             )
             price = self.last_price()
-            return price, price
+            return price, price, price, price
+
+    def minute_range(self) -> tuple[float, float]:
+        """(high, low) of the latest 1m candle — catches intra-minute wicks."""
+        _o, high, low, _c = self.minute_candle()
+        return high, low
 
     @staticmethod
     def _atr_from_ohlcv(ohlcv: list, period: int) -> float | None:
@@ -621,12 +768,350 @@ class PaperSimulator:
             logger.info("decision %s -> no entry (stay flat)", rating)
             self._emit_event("decision", rating=rating, side=None, action="flat")
             return
-        self._emit_event("decision", rating=rating, side=side, action="open")
         final = (state or {}).get("final_trade_decision", "")
         analyst_target = parse_price_target(final)
         exec_plan = parse_execution_plan(final) if self.structural_sl else None
+        if self.structural_sl and self.entry_mode == "plan":
+            outcome = self._try_park(side, rating, exec_plan, analyst_target, now_ts)
+            if outcome == "parked":
+                self._emit_event(
+                    "decision", rating=rating, side=side, action="pending"
+                )
+                return
+            if outcome == "vetoed":
+                # Legs were geometrically sane but every one failed a risk
+                # gate: the PM's own numbers say the trade isn't worth its
+                # stop from any declared entry — stay flat, don't chase.
+                self._emit_event("decision", rating=rating, side=side, action="flat")
+                return
+            # outcome == "market": no usable conditional entry — fall through.
+        self._emit_event("decision", rating=rating, side=side, action="open")
         self.open_position(
             side, rating, analyst_target=analyst_target, exec_plan=exec_plan
+        )
+
+    # ------------------------------------------------------------- pending
+    @staticmethod
+    def _leg_desc(side: str, leg: dict) -> str:
+        """Compact one-leg description for logs, e.g.
+        ``pullback 183.70-184.00`` / ``breakout >=185.00``."""
+        if leg["kind"] == "pullback":
+            head = f"pullback {leg['zone_low']:.4f}-{leg['zone_high']:.4f}"
+        else:
+            arrow = ">=" if side == "buy" else "<="
+            head = f"breakout {arrow}{leg['trigger']:.4f}"
+        extras = []
+        if leg.get("price_target") is not None:
+            extras.append(f"target {leg['price_target']:.4f}")
+        if leg.get("invalidation_level") is not None:
+            extras.append(f"inval {leg['invalidation_level']:.4f}")
+        return head + (f" ({', '.join(extras)})" if extras else "")
+
+    def _try_park(
+        self, side: str, rating: str, exec_plan: dict | None,
+        analyst_target: float | None, now_ts: float,
+    ) -> str:
+        """Park the PM's entry legs as pending conditional OCO orders.
+
+        Returns "parked", "vetoed" (every geometrically sane leg failed a
+        risk gate — the caller stays flat) or "market" (no usable legs — the
+        caller degrades to the market entry it was about to do anyway).
+        """
+        raw_legs = (exec_plan or {}).get("entry_legs")
+        if not raw_legs:
+            logger.info("no entry legs in the execution plan -> market entry")
+            return "market"
+        norm, err = normalize_execution_plan(exec_plan)
+        if err:
+            # The stop contract is what the whole pending lifecycle hangs
+            # off (kill levels, per-leg gates); without it the legs are
+            # orphans — degrade to the market path, which already handles
+            # a broken contract via the ATR fallback.
+            logger.info("entry park: stop contract unusable (%s) -> market entry", err)
+            return "market"
+        ref_price = self.last_price()
+        atr = self._atr()
+        # Basis: the PM's levels were born on SPOT data, the tape we watch is
+        # the perp — freeze the ratio at park and translate every level. The
+        # fill-time contract re-anchors on its own fresh ratio.
+        ratio = 1.0
+        spot = self._spot_price()
+        if spot and spot > 0:
+            ratio = ref_price / spot
+        else:
+            logger.warning("entry park: spot unavailable, basis ratio defaults to 1")
+        norm_perp = dict(norm)
+        for key in ("soft", "hard", "target"):
+            if norm_perp[key] is not None:
+                norm_perp[key] = norm_perp[key] * ratio
+        # Thesis already dead at the declared levels -> same veto as the
+        # market path's invalidation gate.
+        plan_levels, plan_err, vetoed = resolve_structural_levels(
+            norm_perp, side, ref_price, atr
+        )
+        if vetoed:
+            logger.info(
+                "entry park VETOED: price %.4f already beyond the declared "
+                "invalidation", ref_price,
+            )
+            self._emit_event("veto", gate="invalidation", entry=ref_price)
+            return "vetoed"
+        legs_spot = normalize_entry_legs(raw_legs)
+        legs = []
+        for ls in legs_spot:
+            leg = {"kind": ls["kind"], "spot": ls}
+            for field in ("zone_low", "zone_high", "trigger", "price_target",
+                          "invalidation_level"):
+                leg[field] = ls[field] * ratio if ls[field] is not None else None
+            legs.append(leg)
+        legs, dropped = validate_legs(side, legs, ref_price, atr)
+        for reason in dropped:
+            logger.info("entry leg dropped: %s", reason)
+            self._emit_event("leg_dropped", side=side, reason=reason)
+        if not legs:
+            logger.info("no geometrically usable entry leg -> market entry")
+            return "market"
+        # Risk gates PER LEG: a pending leg's entry price is known in
+        # advance, so cost and target gates can price each scenario on its
+        # own geometry (a pullback fill sits nearer the structural stop than
+        # a breakout fill — their implied RR differ wildly).
+        survivors = []
+        rr = self.cfg.take_profit_rr
+        cost_pct = 2.0 * (self.fee + self.slippage)
+        for leg in legs:
+            long = side == "buy"
+            entry_est = (
+                (leg["zone_high"] if long else leg["zone_low"])
+                if leg["kind"] == "pullback" else leg["trigger"]
+            )
+            leg_norm = dict(norm_perp)
+            override = leg["invalidation_level"]
+            if override is not None:
+                # The override replaces the soft AND discards the declared
+                # hard: that hard was buffered around the PLAN's soft, so
+                # against this leg's geometry it is stale — sizing on it
+                # would price a risk the leg's own thesis never accepts.
+                # The auto buffer re-derives it from the new soft.
+                leg_norm["soft"] = override
+                leg_norm["hard"] = None
+            resolved, res_err, leg_vetoed = resolve_structural_levels(
+                leg_norm, side, entry_est, atr
+            )
+            if leg_vetoed:
+                self._drop_leg(side, leg, "entry level beyond its own invalidation")
+                continue
+            if resolved is not None:
+                stop_pct = abs(entry_est - resolved["hard"]) / entry_est * 100.0
+            else:
+                stop_pct = self._effective_stop_pct(entry_est)
+            if self.min_tp_cost_mult > 0 and stop_pct * rr < self.min_tp_cost_mult * cost_pct:
+                self._drop_leg(
+                    side, leg,
+                    f"cost gate: expected TP {stop_pct * rr:.3f}% < "
+                    f"{self.min_tp_cost_mult:g}x round-trip cost {cost_pct:.3f}%",
+                    gate="cost",
+                )
+                continue
+            target_est = leg["price_target"]
+            if target_est is None and resolved is not None:
+                target_est = resolved["target"]
+            if self.min_analyst_rr > 0 and target_est is not None and stop_pct > 0:
+                tgt_dist = target_est - entry_est if long else entry_est - target_est
+                implied_rr = (tgt_dist / entry_est * 100.0) / stop_pct
+                if implied_rr < self.min_analyst_rr:
+                    self._drop_leg(
+                        side, leg,
+                        f"target gate: {target_est:.4f} implies {implied_rr:.2f}x "
+                        f"the stop (floor {self.min_analyst_rr:g}x)",
+                        gate="target",
+                    )
+                    continue
+            # The fill-time contract: the plan in SPOT geometry with this
+            # leg's overrides applied, re-resolved from scratch at the fill.
+            raw_plan = {
+                k: v for k, v in exec_plan.items() if k != "entry_legs"
+            }
+            if leg["spot"]["invalidation_level"] is not None:
+                # Same rule as the gating above: the override discards the
+                # plan-buffered hard, the fill-time resolve re-derives it.
+                raw_plan["invalidation_level"] = leg["spot"]["invalidation_level"]
+                raw_plan["hard_level"] = None
+            if leg["spot"]["price_target"] is not None:
+                raw_plan["price_target"] = leg["spot"]["price_target"]
+            leg["raw_plan"] = raw_plan
+            del leg["spot"]
+            survivors.append(leg)
+        if not survivors:
+            logger.info("every entry leg failed a risk gate -> no trade")
+            return "vetoed"
+        horizon = norm["horizon_minutes"]
+        ttl_min = self.entry_ttl_min
+        if horizon:
+            # Waiting longer than the thesis' own clock to ENTER would leave
+            # no room for it to play out.
+            ttl_min = min(ttl_min, horizon)
+        self.state["pending"] = {
+            "side": side,
+            "rating": rating,
+            "legs": survivors,
+            "analyst_target": analyst_target,
+            "ref_price": ref_price,
+            "ratio": ratio,
+            # Plan-level kill switch while the order rests: hard on touch,
+            # soft per its own semantics (close/hold need 15m confirmation).
+            "soft": (plan_levels or norm_perp)["soft"],
+            "hard": plan_levels["hard"] if plan_levels else None,
+            "semantics": norm["semantics"],
+            "confirm_bars": norm["confirm_bars"],
+            "count": 0,
+            "last_eval_bar_ts": None,
+            "opened_ts": now_ts,  # _soft_confirmed keys off this name
+            "created_at": _now_iso(),
+            "created_ts": now_ts,
+            "expires_ts": now_ts + ttl_min * 60.0,
+            "regime_against_ticks": 0,
+        }
+        if plan_err:
+            logger.info(
+                "entry park: no structural kill levels while resting (%s); "
+                "the contract re-resolves at fill", plan_err,
+            )
+        desc = " OR ".join(self._leg_desc(side, leg) for leg in survivors)
+        logger.info(
+            "PENDING %s %s: %s | valid %.0fmin | ref %.4f (basis ratio %.6f)",
+            side, self.cfg.symbol, desc, ttl_min, ref_price, ratio,
+        )
+        self._emit_event(
+            "pending", symbol=self.cfg.symbol, side=side, rating=rating,
+            legs=[{k: v for k, v in leg.items() if k != "raw_plan"}
+                  for leg in survivors],
+            ref_price=ref_price, ttl_min=ttl_min, ratio=ratio,
+        )
+        return "parked"
+
+    def _drop_leg(self, side: str, leg: dict, reason: str, gate: str | None = None) -> None:
+        logger.info(
+            "entry leg VETOED (%s): %s", self._leg_desc(side, leg), reason
+        )
+        self._emit_event(
+            "leg_vetoed", side=side, leg_kind=leg["kind"], reason=reason, gate=gate
+        )
+
+    def _clear_pending(self, event: str, **fields) -> None:
+        p = self.state["pending"]
+        self.state["pending"] = None
+        self._emit_event(
+            event, symbol=self.cfg.symbol, side=p["side"], rating=p["rating"],
+            legs=[{k: v for k, v in leg.items() if k != "raw_plan"}
+                  for leg in p["legs"]],
+            age_min=(time.time() - p["created_ts"]) / 60.0, **fields,
+        )
+
+    def check_pending(self, now_ts: float) -> None:
+        """One watch tick for the pending legs: expire, cancel, kill, or fill.
+
+        Order of checks is deliberately pessimistic: fills run BEFORE the
+        structural kill, so a candle that sweeps the entry zone and then the
+        hard level opens the position and immediately flushes it out at the
+        stop (same-candle flush) — the loss a live resting order would take —
+        instead of a convenient cancellation.
+        """
+        p = self.state["pending"]
+        side = p["side"]
+        long = side == "buy"
+        if now_ts >= p["expires_ts"]:
+            logger.info(
+                "PENDING EXPIRED after %.0fmin without a fill (was: %s)",
+                (now_ts - p["created_ts"]) / 60.0,
+                " OR ".join(self._leg_desc(side, leg) for leg in p["legs"]),
+            )
+            self._clear_pending("pending_expired", price=self.last_price())
+            return
+        # A persistent opposite regime while resting cancels the plan: unlike
+        # an open position (whose armed contract owns the exit), cancelling a
+        # pending costs nothing, and the next analysis can re-park the thesis
+        # if it still stands.
+        ready, regime, reason_txt = self._regime_ready()
+        against = (regime == "down" and long) or (regime == "up" and not long)
+        if ready and against:
+            p["regime_against_ticks"] = p.get("regime_against_ticks", 0) + 1
+            if p["regime_against_ticks"] >= max(1, self.regime_persist_ticks):
+                logger.info(
+                    "regime flipped against pending %s (%s) — cancelling "
+                    "the plan: %s", side, regime, reason_txt,
+                )
+                self._clear_pending("pending_regime_cancel", regime=regime)
+                return
+        else:
+            p["regime_against_ticks"] = 0
+        o, high, low, close = self.minute_candle()
+        leg, fill_price = check_entry(side, p["legs"], o, high, low, close)
+        if leg is not None:
+            logger.info(
+                "PENDING FILLED (%s) %s @ %.4f — other leg cancelled",
+                leg["kind"], side, fill_price,
+            )
+            analyst_target = p["analyst_target"]
+            rating = p["rating"]
+            raw_plan = leg.get("raw_plan")
+            self._clear_pending(
+                "pending_fill", leg_kind=leg["kind"], fill_price=fill_price,
+            )
+            self.open_position(
+                side, rating, analyst_target=analyst_target,
+                exec_plan=raw_plan, entry_kind=leg["kind"],
+                trigger_price=fill_price,
+            )
+            pos = self.state["open"]
+            if pos is None:
+                return  # a fill-time gate vetoed the entry
+            reason, exit_price = check_hit(
+                pos["side"], pos["sl"], pos["tp"], high, low
+            )
+            if reason:
+                logger.info(
+                    "same-candle flush: the minute that filled the entry also "
+                    "ran through %s — closing immediately", reason,
+                )
+                self.close_position(exit_price, reason)
+            return
+        # No fill: is the thesis dying while we rest? Hard kills on touch;
+        # soft kills per its declared semantics (touch instantly, close/hold
+        # only on confirmed 15m closes — the sweep wick that would FILL a
+        # pullback must not cancel it).
+        hard = p.get("hard")
+        if hard is not None and ((low <= hard) if long else (high >= hard)):
+            logger.info(
+                "PENDING KILLED: 1m range crossed the hard level %.4f before "
+                "any fill", hard,
+            )
+            self._clear_pending("pending_killed", cause="hard_touch", level=hard)
+            return
+        soft = p.get("soft")
+        if soft is not None:
+            if p.get("semantics") == "touch":
+                if (low <= soft) if long else (high >= soft):
+                    logger.info(
+                        "PENDING KILLED: 1m range crossed the invalidation "
+                        "%.4f (touch semantics) before any fill", soft,
+                    )
+                    self._clear_pending(
+                        "pending_killed", cause="soft_touch", level=soft
+                    )
+                    return
+            elif self._soft_confirmed({"side": side}, p):
+                logger.info(
+                    "PENDING KILLED: soft invalidation %.4f confirmed by %d "
+                    "15m close(s) before any fill", soft, p["count"],
+                )
+                self._clear_pending(
+                    "pending_killed", cause="soft_confirmed", level=soft
+                )
+                return
+        logger.info(
+            "pending watch %s: 1m range [%.4f, %.4f] vs %s",
+            side, low, high,
+            " / ".join(self._leg_desc(side, x) for x in p["legs"]),
         )
 
     def _fill_price(self, price: float, fill_side: str) -> float:
@@ -746,9 +1231,26 @@ class PaperSimulator:
         rating: str,
         analyst_target: float | None = None,
         exec_plan: dict | None = None,
+        *,
+        entry_kind: str = "market",
+        trigger_price: float | None = None,
     ) -> None:
-        ref_price = self.last_price()
-        entry = self._fill_price(ref_price, side)  # market entry slips against us
+        """Open the simulated position.
+
+        ``entry_kind`` records how we got in: "market" (immediate, adverse
+        slippage), "pullback" (resting limit — fills at its own price, no
+        slippage) or "breakout" (stop-market on the trigger — slips like a
+        market order). For leg fills ``exec_plan`` is the leg's own contract
+        (spot geometry, overrides applied) and ``trigger_price`` its perp
+        fill level.
+        """
+        ref_price = trigger_price if trigger_price is not None else self.last_price()
+        # A pullback is a resting limit order (fills at its own price);
+        # market and breakout entries slip against us like live taker fills.
+        entry = (
+            ref_price if entry_kind == "pullback"
+            else self._fill_price(ref_price, side)
+        )
         equity = self.state["equity"]
         structural = None
         if self.structural_sl:
@@ -823,6 +1325,7 @@ class PaperSimulator:
             "side": side,
             "rating": rating,
             "entry": entry,
+            "entry_kind": entry_kind,
             "size": size,
             "sl": sl,
             "tp": tp,
@@ -861,7 +1364,8 @@ class PaperSimulator:
         )
         self._emit_event(
             "open", symbol=self.cfg.symbol, side=side, rating=rating, entry=entry,
-            ref_price=ref_price, slip_pct=self.slippage, size=size, sl=sl, tp=tp,
+            entry_kind=entry_kind, ref_price=ref_price, slip_pct=self.slippage,
+            size=size, sl=sl, tp=tp,
             tp_source=tp_source, stop_pct=stop_pct, rr=rr, stop_mode=self.cfg.stop_mode,
             notional=notional, equity=equity, **structural_fields,
         )
@@ -1066,7 +1570,13 @@ class PaperSimulator:
 
     def summary(self) -> str:
         s = self.state
-        pos = "flat" if not s["open"] else f"OPEN {s['open']['side']} @ {s['open']['entry']:.4f}"
+        if s["open"]:
+            pos = f"OPEN {s['open']['side']} @ {s['open']['entry']:.4f}"
+        elif s.get("pending"):
+            p = s["pending"]
+            pos = f"PENDING {p['side']} ({len(p['legs'])} leg{'s' if len(p['legs']) > 1 else ''})"
+        else:
+            pos = "flat"
         return (
             f"equity {s['equity']:.2f} | trades {len(s['closed'])} "
             f"(W {s['wins']}/L {s['losses']}) | pnl {s['pnl_total']:+.2f} | {pos}"

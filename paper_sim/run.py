@@ -46,6 +46,8 @@ def main() -> int:
         regime_exit_check=os.environ.get("REGIME_EXIT_CHECK", "0") == "1",
         min_analyst_rr=float(os.environ.get("MIN_ANALYST_RR", "0")),
         structural_sl=os.environ.get("STRUCTURAL_SL", "0") == "1",
+        entry_mode=os.environ.get("ENTRY_MODE", "market").strip().lower(),
+        entry_ttl_min=float(os.environ.get("ENTRY_TTL_MIN", "120")),
     )
     monitor_interval = float(os.environ.get("MONITOR_INTERVAL_SEC", "60"))
 
@@ -62,6 +64,8 @@ def main() -> int:
             now = time.time()
             if sim.has_open():
                 sim.monitor()
+            elif sim.has_pending():
+                sim.check_pending(now)
             elif sim.should_decide(now):
                 log.info("setup detected (flat) — running analysis, this takes a few minutes...")
                 sim.maybe_decide(now)

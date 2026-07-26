@@ -239,6 +239,11 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
             "price_target": decision.price_target,
             "horizon_minutes": plan.horizon_minutes,
         }
+        legs = getattr(plan, "entry_legs", None)
+        if legs:
+            payload["entry_legs"] = [
+                leg.model_dump(exclude_none=True) for leg in legs
+            ]
         parts.extend([
             "",
             "**Execution Plan**:",
@@ -327,6 +332,103 @@ class PortfolioDecisionStructural(PortfolioDecision):
         description=(
             "Mandatory stop contract. The executor honours it literally; "
             "see the scenario instructions for the exact execution semantics."
+        ),
+    )
+
+
+class EntryLeg(BaseModel):
+    """One conditional entry scenario inside the PM's execution plan.
+
+    Legs execute OCO: the first whose condition triggers becomes the position,
+    the other is cancelled, and the whole plan expires unfilled after its TTL.
+    Exits stay governed by the plan's stop contract (soft/hard dual-track);
+    only the ENTRY side of a leg executes on touch.
+    """
+
+    kind: Literal["pullback", "breakout"] = Field(
+        description=(
+            "'pullback' = resting limit inside a retracement zone expected to "
+            "hold; 'breakout' = stop-entry once price trades beyond a trigger "
+            "level."
+        ),
+    )
+    zone_low: float | None = Field(
+        default=None,
+        description=(
+            "Pullback legs only: lower bound of the entry zone. "
+            "Omit for breakout legs."
+        ),
+    )
+    zone_high: float | None = Field(
+        default=None,
+        description=(
+            "Pullback legs only: upper bound of the entry zone. The entry "
+            "fills at the zone edge nearest to the current price. "
+            "Omit for breakout legs."
+        ),
+    )
+    trigger: float | None = Field(
+        default=None,
+        description=(
+            "Breakout legs only: the level whose break triggers the entry "
+            "(above current price for a long, below for a short). EXECUTION: "
+            "a stop-entry that fires the instant price TOUCHES it — a wick is "
+            "enough. If your thesis needs acceptance beyond a level, place "
+            "the trigger past it by a noise margin. Omit for pullback legs."
+        ),
+    )
+    price_target: float | None = Field(
+        default=None,
+        description=(
+            "Target for THIS entry scenario (a breakout measures its "
+            "extension from the broken level; a pullback often targets the "
+            "opposite end of the range). Null = the decision's overall "
+            "price_target applies."
+        ),
+    )
+    invalidation_level: float | None = Field(
+        default=None,
+        description=(
+            "Level override that voids THIS leg's thesis, replacing the "
+            "plan's invalidation_level for the position this leg opens (the "
+            "declared invalidation_semantics and confirm_bars still apply). "
+            "Use it when the leg's entry geometry moves the structural edge "
+            "— e.g. a breakout leg is usually invalidated by a failure back "
+            "under the broken level, far above the pullback zone's floor. "
+            "Null = the plan's own invalidation_level."
+        ),
+    )
+
+
+class ExecutionPlanEntry(ExecutionPlan):
+    """ExecutionPlan plus optional conditional entry legs (OCO executor)."""
+
+    entry_legs: list[EntryLeg] | None = Field(
+        default=None,
+        description=(
+            "Conditional entry plan: up to two OCO legs — at most one "
+            "pullback and one breakout — expressing WHERE the position "
+            "should be entered instead of entering at market. Give concrete "
+            "levels from the analysis; a leg whose level hugs the current "
+            "price (closer than the minimum ATR distance the scenario "
+            "states) is dropped as equivalent to a market entry. Omit "
+            "entirely when an immediate market entry is genuinely intended."
+        ),
+    )
+
+
+class PortfolioDecisionStructuralEntry(PortfolioDecisionStructural):
+    """Structural decision whose plan also carries conditional entry legs.
+
+    Bound only when both the structural-SL flag and ENTRY_MODE=plan are
+    active, so structural-only profiles keep a byte-identical schema.
+    """
+
+    execution_plan: ExecutionPlanEntry = Field(
+        description=(
+            "Mandatory stop contract, plus the optional conditional entry "
+            "legs. The executor honours every field literally; see the "
+            "scenario instructions for the exact execution semantics."
         ),
     )
 

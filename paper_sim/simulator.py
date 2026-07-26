@@ -61,7 +61,11 @@ _CONFIRM_TF = "15m"          # confirmation bar timeframe for close/hold
 _CONFIRM_SEC = 900.0
 _DEFAULT_CONFIRM_BARS = {"close": 1, "hold": 2}
 _HARD_BUFFER_ATR = 0.4       # default hard = soft + this x ATR x confirm_bars
-_HARD_ATR_RANGE = (0.2, 3.0)  # accepted hard distance, in ATRs from entry
+# Accepted hard distance, in ATRs from entry. The upper bound is a sanity
+# check, not a risk limit (sizing already prices the hard distance in): 3.0
+# rejected roughly half the declared contracts in quiet hours, when a real
+# structural shelf 1-2% away is many multiples of a shrunken 15m ATR.
+_HARD_ATR_RANGE = (0.2, 6.0)
 _HARD_GAP_FLOOR_ATR = 0.25   # min declared soft->hard gap, x ATR x confirm_bars
 
 
@@ -916,12 +920,31 @@ class PaperSimulator:
                 regime == "up" and pos["side"] == "sell"
             )
             if ready and against:
-                logger.info(
-                    "regime flipped against open %s (%s) — closing early instead of "
-                    "riding to the stop: %s", pos["side"], regime, reason_txt,
-                )
-                self.close_position(self.last_price(), "REGIME")
-                return
+                if st:
+                    # An armed contract IS the declared exit logic: the PM
+                    # already said what kills the thesis, so a 1m regime read
+                    # must not overrule it. Flag once per position — the A/B
+                    # tally needs to know which trades the old rule would
+                    # have cut short.
+                    if not st.get("regime_suppressed"):
+                        st["regime_suppressed"] = True
+                        logger.info(
+                            "regime flipped against open %s (%s) but the "
+                            "structural contract is armed — exit left to the "
+                            "contract: %s", pos["side"], regime, reason_txt,
+                        )
+                        self._emit_event(
+                            "regime_exit_suppressed",
+                            regime=regime, price=self.last_price(),
+                        )
+                else:
+                    logger.info(
+                        "regime flipped against open %s (%s) — closing early "
+                        "instead of riding to the stop: %s",
+                        pos["side"], regime, reason_txt,
+                    )
+                    self.close_position(self.last_price(), "REGIME")
+                    return
         logger.info(
             "monitor open %s: 1m range [%.4f, %.4f] vs SL %.4f TP %.4f",
             pos["side"], low, high, pos["sl"], pos["tp"],
@@ -1020,6 +1043,7 @@ class PaperSimulator:
                 "semantics": st.get("semantics"),
                 "confirm_count": st.get("count"),
                 "soft_touched": bool(st.get("soft_touched")),
+                "regime_suppressed": bool(st.get("regime_suppressed")),
                 "basis_ratio": st.get("ratio"),
             }
             if reason == "SOFT":

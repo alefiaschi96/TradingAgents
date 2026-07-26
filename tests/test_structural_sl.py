@@ -130,7 +130,7 @@ def test_resolve_geometry_cascade():
     bad = dict(norm, hard=99.5)
     _, err, vetoed = resolve_structural_levels(bad, "buy", 100.0, 2.0)
     assert err and not vetoed
-    # hard distance beyond 3xATR -> reject
+    # hard distance beyond 6xATR -> reject
     far = dict(norm, hard=80.0)
     _, err, _ = resolve_structural_levels(far, "buy", 100.0, 2.0)
     assert err and "outside" in err
@@ -139,6 +139,40 @@ def test_resolve_geometry_cascade():
     levels, err, _ = resolve_structural_levels(auto, "buy", 100.0, 2.0)
     assert err is None
     assert levels["hard"] == 99.0 - 0.4 * 2.0 * 2
+
+
+def test_regime_exit_suppressed_when_structural_armed(tmp_path, monkeypatch):
+    events = []
+    sim = make_sim(tmp_path, monkeypatch, events=events, regime_exit_check=True)
+    sim._regime_ready = lambda: (True, "down", "test regime")
+    sim._fetch_ohlcv = lambda tf, limit: []  # no 15m bars -> no soft confirm
+    open_structural(sim)
+    sim.monitor()
+    # position survives: the armed contract owns the exit
+    assert sim.state["open"] is not None
+    suppressed = [e for e in events if e[0] == "regime_exit_suppressed"]
+    assert len(suppressed) == 1 and suppressed[0][1]["regime"] == "down"
+    # flagged once per position, not once per tick
+    sim.monitor()
+    assert len([e for e in events if e[0] == "regime_exit_suppressed"]) == 1
+    # the close telemetry carries the flag for the A/B tally
+    sim.close_position(100.0, "TIME")
+    close_ev = [e for e in events if e[0] == "close"][0][1]
+    assert close_ev["regime_suppressed"] is True
+
+
+def test_regime_exit_still_closes_without_contract(tmp_path, monkeypatch):
+    events = []
+    sim = make_sim(
+        tmp_path, monkeypatch, structural=False, events=events,
+        regime_exit_check=True,
+    )
+    sim._regime_ready = lambda: (True, "down", "test regime")
+    sim.open_position("buy", "Buy", exec_plan=None)
+    sim.monitor()
+    assert sim.state["open"] is None
+    close_ev = [e for e in events if e[0] == "close"][0][1]
+    assert close_ev["outcome"] == "REGIME"
 
 
 def test_declared_hard_gap_floor():

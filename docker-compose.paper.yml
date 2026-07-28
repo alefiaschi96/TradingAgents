@@ -173,9 +173,9 @@ services:
       - hype-tuned
 
   # --- profilo "struct": tuned + STRUCTURAL_SL (stop a doppio binario dal
-  # contratto del PM). Una sola variabile cambia rispetto alle tuned, che
-  # diventano gruppo di controllo — per questo solo SOL e HYPE: sono gli
-  # unici simboli con un profilo tuned da usare come controllo pulito.
+  # contratto del PM) + ingressi OCO parcheggiati (ENTRY_MODE=plan) +
+  # conditional holds + modelli gpt-5.6 — allineato al setup di Paul per
+  # confrontare le run. Le tuned restano il controllo a mercato.
   sol-struct:
     <<: *daemon
     environment: &struct-sol-env
@@ -192,11 +192,11 @@ services:
       REGIME_EXIT_CHECK: "1"
       MIN_ANALYST_RR: "1.5"
       STRUCTURAL_SL: "1"
-      # A/B vs hype-struct: SOL parks the PM's OCO entry legs instead of
-      # entering at market, and near-trigger HOLDs reach the PM.
       ENTRY_MODE: "plan"
       ENTRY_TTL_MIN: "120"
       CONDITIONAL_HOLDS: "1"
+      DEEP_MODEL: "gpt-5.6-sol"
+      QUICK_MODEL: "gpt-5.6-luna"
 
   sol-struct-dashboard:
     <<: *dashboard
@@ -225,6 +225,11 @@ services:
       REGIME_EXIT_CHECK: "1"
       MIN_ANALYST_RR: "1.5"
       STRUCTURAL_SL: "1"
+      ENTRY_MODE: "plan"
+      ENTRY_TTL_MIN: "120"
+      CONDITIONAL_HOLDS: "1"
+      DEEP_MODEL: "gpt-5.6-sol"
+      QUICK_MODEL: "gpt-5.6-luna"
 
   hype-struct-dashboard:
     <<: *dashboard

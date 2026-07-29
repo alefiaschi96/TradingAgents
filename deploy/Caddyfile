@@ -2,6 +2,11 @@
 # L'hash bcrypt della password NON sta nel repo: va in .env.live sul server
 # come DASH_HASH (generalo con: docker run --rm caddy:2 caddy hash-password).
 # I domini *.sslip.io risolvono automaticamente all'IP contenuto nel nome.
+#
+# Caddy gira in network_mode host (la dashboard di Paul binda 127.0.0.1
+# hardcoded, irraggiungibile dalla rete bridge), quindi gli upstream sono le
+# porte che ogni dashboard pubblica sul loopback del server, non i nomi dei
+# servizi compose.
 
 (auth) {
 	basic_auth {
@@ -11,40 +16,40 @@
 
 sol.167.233.228.170.sslip.io {
 	import auth
-	reverse_proxy sol-dashboard:8765
+	reverse_proxy 127.0.0.1:8765
 }
 
 ada.167.233.228.170.sslip.io {
 	import auth
-	reverse_proxy ada-dashboard:8765
+	reverse_proxy 127.0.0.1:8766
 }
 
 btc.167.233.228.170.sslip.io {
 	import auth
-	reverse_proxy btc-dashboard:8765
+	reverse_proxy 127.0.0.1:8767
 }
 
 hype.167.233.228.170.sslip.io {
 	import auth
-	reverse_proxy hype-dashboard:8765
+	reverse_proxy 127.0.0.1:8768
 }
 
 soltuned.167.233.228.170.sslip.io {
 	import auth
-	reverse_proxy sol-tuned-dashboard:8765
+	reverse_proxy 127.0.0.1:8769
 }
 
 hypetuned.167.233.228.170.sslip.io {
 	import auth
-	reverse_proxy hype-tuned-dashboard:8765
+	reverse_proxy 127.0.0.1:8770
 }
 
-solstruct.167.233.228.170.sslip.io {
+solpaul.167.233.228.170.sslip.io {
 	import auth
-	reverse_proxy sol-struct-dashboard:8765
+	reverse_proxy 127.0.0.1:8771
 }
 
-hypestruct.167.233.228.170.sslip.io {
+hypepaul.167.233.228.170.sslip.io {
 	import auth
-	reverse_proxy hype-struct-dashboard:8765
+	reverse_proxy 127.0.0.1:8772
 }

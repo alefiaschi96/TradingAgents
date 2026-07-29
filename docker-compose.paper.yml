@@ -242,22 +242,18 @@ services:
     depends_on:
       - hype-struct
 
+  # Rete host: gli upstream del Caddyfile sono le porte loopback del server
+  # (la dashboard paul binda 127.0.0.1 hard e la bridge non la raggiunge).
+  # Niente depends_on: caddy non deve resuscitare dashboard ferme.
   caddy:
     image: caddy:2
     restart: unless-stopped
     env_file: .env.live
-    ports:
-      - "80:80"
-      - "443:443"
+    network_mode: host
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    depends_on:
-      - sol-dashboard
-      - ada-dashboard
-      - btc-dashboard
-      - hype-dashboard
 
 volumes:
   paper_data:

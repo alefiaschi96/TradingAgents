@@ -1,24 +1,20 @@
-# Run del codice di Paul (branch `paul` @ 4a39cc3) TALE E QUALE sui nostri due
-# simboli — sostituisce le run sol-struct/hype-struct per un confronto onesto
-# col suo setup. Il codice NON è il branch ale: build da un worktree fratello.
-#
-# Setup sul server (una tantum, il deploy lo fa da solo):
-#   cd /root/TradingAgents
-#   git fetch origin paul
-#   git worktree add /root/TradingAgents-paul origin/paul
-#   cp Dockerfile.live requirements-live.txt /root/TradingAgents-paul/
-#     (il branch paul non ha l'infra di deploy: Dockerfile.live e
-#      requirements-live.txt vengono presi dal branch ale, il codice no)
+# Run del codice di Paul TALE E QUALE sui nostri due simboli — sostituisce le
+# run sol-struct/hype-struct per un confronto onesto col suo setup. Il codice
+# NON è il branch ale: è l'albero completo di Paul (commit 4a39cc3 + le sue
+# modifiche locali mai pushate, incluso il profit lock trailing), consegnato
+# via archivio TradingAgents_con_ingresso.rar e sincronizzato dal Mac in
+# /root/TradingAgents-paul (esclusi .git, .venv, log e il SUO .env.live: le
+# chiavi restano le nostre via env_file). Il suo albero non ha l'infra di
+# deploy: Dockerfile.live e requirements-live.txt vengono copiati dal branch
+# ale, il codice no.
 #
 # Avvio (stesso project name del compose principale, volume condiviso):
 #   docker compose -f docker-compose.paper.yml -f docker-compose.paul.yml \
 #       up -d --build sol-paul hype-paul sol-paul-dashboard hype-paul-dashboard
 #
 # Env: .env.live è la base comune (già identica a quella di Paul); qui sotto
-# solo i suoi delta. PROFIT_LOCK_PCT=0.3 è la variante a floor fisso presente
-# nel suo branch pushato; il suo env di produzione nomina un lock TRAILING
-# (PROFIT_LOCK_TRIGGER_PCT/TRAIL_ATR) che NON ha ancora pushato — quando lo
-# pusha, si ribuilda e si allinea anche quello.
+# solo i suoi delta, con i valori del suo env di produzione (lock trailing
+# armato a 0.3% dal TP, trail 1.0 ATR; breakout fill al touch).
 #
 # La sua dashboard binda 127.0.0.1 hardcoded: i servizi dashboard girano in
 # network_mode host così bindano il loopback del VPS direttamente (stesse
@@ -53,7 +49,9 @@ x-paul-env: &paul-env
   ENTRY_MAX_STOP_WIDEN: "2.0"
   CONDITIONAL_HOLDS: "false"
   CONDITIONAL_MAX_ATR: "2.0"
-  PROFIT_LOCK_PCT: "0.3"
+  BREAKOUT_REQUIRE_CLOSE: "false"
+  PROFIT_LOCK_TRIGGER_PCT: "0.3"
+  PROFIT_LOCK_TRAIL_ATR: "1.0"
 
 services:
   sol-paul:

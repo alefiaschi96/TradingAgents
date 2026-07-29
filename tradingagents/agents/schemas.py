@@ -203,10 +203,8 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
 class PositionSize(str, Enum):
     """Conviction-scaled position-size tier.
 
-    Informational only: no live equity figure is available at analysis time,
-    so this is a qualitative sizing recommendation for the report/logs, not a
-    dollar amount. Actual order sizing in live/paper execution keeps using
-    its own config-driven logic.
+    Drives actual order sizing in paper/live execution: Full commits ~98% of
+    equity, Half ~49%, Quarter ~24.5%. None means no trade.
     """
 
     FULL = "Full"
@@ -215,14 +213,30 @@ class PositionSize(str, Enum):
     NONE = "None"
 
 
+class RiskProfile(str, Enum):
+    """SL/TP bracket chosen from the ATR-based profiles.
+
+    Each profile uses a different ATR multiplier for the stop and a different
+    R-multiple for the take-profit target:
+    - Tight:    1.0×ATR stop, 2R TP  (high conviction, clean setup)
+    - Standard: 1.5×ATR stop, 2R TP  (balanced default)
+    - Wide:     2.0×ATR stop, 3R TP  (volatile / uncertain conditions)
+    """
+
+    TIGHT = "Tight"
+    STANDARD = "Standard"
+    WIDE = "Wide"
+
+
 class RiskDecision(BaseModel):
     """Structured output produced by the Risk Manager.
 
     The Risk Manager is the only agent that speaks to stop-loss, take-profit,
     and position size — and it must source stop_loss/take_profit from the
     deterministic ATR tool (``get_sl_tp_levels``), never invent them. The LLM
-    call that fills this schema is instructed to copy the tool's numbers
-    verbatim and only decide the final rating and position-size tier.
+    call that fills this schema picks a risk profile (Tight/Standard/Wide)
+    and position-size tier; the code then overrides stop_loss and take_profit
+    with the chosen profile's precomputed values.
     """
 
     rating: PortfolioRating = Field(
@@ -232,18 +246,29 @@ class RiskDecision(BaseModel):
             "if the critic vetoed the trade."
         ),
     )
+    risk_profile: RiskProfile = Field(
+        default=RiskProfile.STANDARD,
+        description=(
+            "Which SL/TP bracket to use from the ATR tool output: "
+            "Tight (1.0×ATR, 2R) for high-conviction clean setups, "
+            "Standard (1.5×ATR, 2R) as the balanced default, or "
+            "Wide (2.0×ATR, 3R) for volatile or uncertain conditions. "
+            "Pick the profile that best matches current volatility and "
+            "signal quality."
+        ),
+    )
     stop_loss: float | None = Field(
         default=None,
         description=(
-            "Stop-loss price from the ATR tool output, copied verbatim. None "
+            "Stop-loss price from the chosen ATR profile. None "
             "when the rating is Hold."
         ),
     )
     take_profit: float | None = Field(
         default=None,
         description=(
-            "Take-profit price from the ATR tool output (2R target), copied "
-            "verbatim. None when the rating is Hold."
+            "Take-profit price from the chosen ATR profile. None "
+            "when the rating is Hold."
         ),
     )
     position_size: PositionSize = Field(
@@ -255,8 +280,8 @@ class RiskDecision(BaseModel):
     )
     risk_rationale: str = Field(
         description=(
-            "2-4 sentences explaining the SL/TP levels (ATR-based or "
-            "structural) and the position-size tier chosen."
+            "2-4 sentences explaining the chosen profile, SL/TP levels, "
+            "and the position-size tier."
         ),
     )
 
@@ -275,6 +300,8 @@ def render_risk_decision(decision: RiskDecision) -> str:
     """
     parts = [
         f"**Rating**: {decision.rating.value}",
+        "",
+        f"**Risk Profile**: {decision.risk_profile.value}",
         "",
         f"**Stop Loss**: {decision.stop_loss if decision.stop_loss is not None else 'n/a'}",
         "",

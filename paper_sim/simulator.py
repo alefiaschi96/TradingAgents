@@ -35,6 +35,41 @@ _PRICE_TARGET_RE = re.compile(
     re.I,
 )
 
+# ── Parsers for Risk Manager output ──────────────────────────────────────
+_RM_SL_RE = re.compile(r"\*\*Stop Loss\*\*:\s*([\d.]+)")
+_RM_TP_RE = re.compile(r"\*\*Take Profit\*\*:\s*([\d.]+)")
+_RM_SIZE_RE = re.compile(r"\*\*Position Size\*\*:\s*(\w+)", re.IGNORECASE)
+
+# Maps the Risk Manager's position-size tier to a fraction of equity used
+# as margin.  This is the authoritative sizing source — the RM owns it.
+_TIER_FRACTIONS: dict[str, float] = {
+    "full": 0.98,
+    "half": 0.49,
+    "quarter": 0.245,
+    "none": 0.0,
+}
+
+
+def parse_rm_levels(decision_text: str) -> dict:
+    """Extract SL, TP, and position-size tier from the Risk Manager markdown.
+
+    Returns a dict with keys ``sl``, ``tp``, ``size_fraction`` — each may be
+    None if the value could not be parsed.
+    """
+    sl_m = _RM_SL_RE.search(decision_text or "")
+    tp_m = _RM_TP_RE.search(decision_text or "")
+    sz_m = _RM_SIZE_RE.search(decision_text or "")
+
+    sl = float(sl_m.group(1)) if sl_m else None
+    tp = float(tp_m.group(1)) if tp_m else None
+
+    size_fraction: float | None = None
+    if sz_m:
+        tier = sz_m.group(1).strip().lower()
+        size_fraction = _TIER_FRACTIONS.get(tier)
+
+    return {"sl": sl, "tp": tp, "size_fraction": size_fraction}
+
 
 def parse_price_target(pm_decision: str) -> float | None:
     """The PM report's explicit "**Price Target**: <n>" level, or None.
@@ -465,10 +500,14 @@ class PaperSimulator:
             self._emit_event("decision", rating=rating, side=None, action="flat")
             return
         self._emit_event("decision", rating=rating, side=side, action="open")
-        analyst_target = parse_price_target(
-            (state or {}).get("final_trade_decision", "")
+        decision_text = (state or {}).get("final_trade_decision", "")
+        analyst_target = parse_price_target(decision_text)
+        rm = parse_rm_levels(decision_text)
+        self.open_position(
+            side, rating, analyst_target=analyst_target,
+            rm_sl=rm.get("sl"), rm_tp=rm.get("tp"),
+            rm_size_fraction=rm.get("size_fraction"),
         )
-        self.open_position(side, rating, analyst_target=analyst_target)
 
     def _fill_price(self, price: float, fill_side: str) -> float:
         """Adverse-slippage fill for a market order: a buy fills higher, a sell
@@ -478,16 +517,39 @@ class PaperSimulator:
         return price * (1.0 + slip) if fill_side == "buy" else price * (1.0 - slip)
 
     def open_position(
-        self, side: str, rating: str, analyst_target: float | None = None
+        self, side: str, rating: str, analyst_target: float | None = None,
+        *, rm_sl: float | None = None, rm_tp: float | None = None,
+        rm_size_fraction: float | None = None,
     ) -> None:
         ref_price = self.last_price()
         entry = self._fill_price(ref_price, side)  # market entry slips against us
         equity = self.state["equity"]
-        # SL/TP are set relative to the real (slipped) entry, like live.
-        # Stop width is fixed or ATR-scaled; TP is rr x the stop distance,
-        # capped at the PM's stated price target when that is nearer.
-        stop_pct = self._effective_stop_pct(entry)
-        rr = self.cfg.take_profit_rr
+
+        # ── SL/TP: prefer Risk Manager's ATR-based levels ──────────
+        if rm_sl is not None and rm_tp is not None:
+            sl, tp = rm_sl, rm_tp
+            # Derive stop_pct from the actual SL distance for cost gate / sizing
+            stop_pct = abs(entry - sl) / entry * 100.0 if entry > 0 else 0.0
+            sl_dist = abs(entry - sl)
+            rr = abs(tp - entry) / sl_dist if sl_dist > 0 else 0.0
+            tp_source = "risk_manager"
+        else:
+            # Fallback: config-based computation (legacy path)
+            stop_pct = self._effective_stop_pct(entry)
+            rr = self.cfg.take_profit_rr
+            sl, tp_rr, _close_side = _bracket_prices(side, entry, stop_pct, rr)
+            tp, tp_source = capped_tp(side, entry, tp_rr, analyst_target)
+
+        # ── Safety guard: reject zero-stop trades ──────────────────
+        if stop_pct <= 0:
+            logger.warning(
+                "entry VETOED by zero-stop guard: stop_pct=%.4f%% — "
+                "risk manager or config did not produce a valid stop distance",
+                stop_pct,
+            )
+            self._emit_event("veto", gate="zero_stop", stop_pct=stop_pct)
+            return
+
         cost_pct = 2.0 * (self.fee + self.slippage)  # full round trip, % of notional
         if self.min_tp_cost_mult > 0 and stop_pct * rr < self.min_tp_cost_mult * cost_pct:
             logger.info(
@@ -512,7 +574,12 @@ class PaperSimulator:
                     implied_rr=implied_rr, floor=self.min_analyst_rr,
                 )
                 return
-        margin = equity * self.cfg.balance_pct
+
+        # ── Position sizing: RM tier takes priority ────────────────
+        if rm_size_fraction is not None:
+            margin = equity * rm_size_fraction
+        else:
+            margin = equity * self.cfg.balance_pct
         notional = margin * self.cfg.leverage
         if self.risk_pct_per_trade > 0 and stop_pct > 0:
             # Fixed-fractional risk: losing this trade at the stop costs
@@ -521,13 +588,30 @@ class PaperSimulator:
             risk_notional = equity * self.risk_pct_per_trade / stop_pct
             notional = min(notional, risk_notional)
         size = self.kraken.amount_for_notional(notional, entry)
-        sl, tp_rr, _close_side = _bracket_prices(side, entry, stop_pct, rr)
-        tp, tp_source = capped_tp(side, entry, tp_rr, analyst_target)
-        if tp_source == "analyst_target":
+        # Veto if size is below exchange minimum
+        min_size = self.kraken.min_amount()
+        if min_size > 0 and size < min_size:
             logger.info(
-                "TP capped to analyst price target %.4f (rr bracket wanted %.4f)",
-                tp, tp_rr,
+                "entry VETOED by minimum size: calculated %.4f %s < minimum %.4f %s",
+                size, self.cfg.symbol, min_size, self.cfg.symbol,
             )
+            self._emit_event(
+                "veto", gate="min_size", calculated_size=size, min_size=min_size,
+            )
+            return
+        if size <= 0:
+            logger.warning(
+                "entry VETOED by zero-size guard: size=%.6f — "
+                "position sizing produced no usable amount",
+                size,
+            )
+            self._emit_event("veto", gate="zero_size", calculated_size=size)
+            return
+
+        # When RM provided SL/TP, still allow analyst-target capping for TP
+        if tp_source == "risk_manager" and analyst_target is not None:
+            tp, tp_source = capped_tp(side, entry, tp, analyst_target)
+
         self.state["open"] = {
             "side": side,
             "rating": rating,
@@ -545,12 +629,12 @@ class PaperSimulator:
             "OPEN %s %s @ %.4f (ref %.4f, slip %.3f%%) size %.4f | SL %.4f TP %.4f "
             "(stop %.2f%% x rr %.1f, mode %s, tp %s) | equity %.2f",
             side, self.cfg.symbol, entry, ref_price, self.slippage, size, sl, tp,
-            stop_pct, rr, self.cfg.stop_mode, tp_source, equity,
+            stop_pct, rr, tp_source, tp_source, equity,
         )
         self._emit_event(
             "open", symbol=self.cfg.symbol, side=side, rating=rating, entry=entry,
             ref_price=ref_price, slip_pct=self.slippage, size=size, sl=sl, tp=tp,
-            tp_source=tp_source, stop_pct=stop_pct, rr=rr, stop_mode=self.cfg.stop_mode,
+            tp_source=tp_source, stop_pct=stop_pct, rr=rr, stop_mode=tp_source,
             notional=notional, equity=equity,
         )
 

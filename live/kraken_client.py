@@ -123,8 +123,15 @@ class KrakenClient:
 
     def amount_for_notional(self, notional_usd: float, price: float) -> float:
         """Convert a USD notional into a precision-rounded contract size."""
+        from ccxt.base.errors import InvalidOrder
+
         raw = notional_usd / price
-        return float(self.exchange.amount_to_precision(self.ccxt_symbol, raw))
+        try:
+            return float(self.exchange.amount_to_precision(self.ccxt_symbol, raw))
+        except InvalidOrder:
+            # raw amount is below the exchange minimum precision → return 0
+            # so the caller's min-size veto can handle it gracefully.
+            return 0.0
 
     # ----------------------------------------------------------------- writes
     def set_leverage_isolated(self, leverage: float) -> dict[str, Any]:

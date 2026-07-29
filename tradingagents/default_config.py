@@ -63,6 +63,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
+    "kimi_deep_reasoning_effort": None,   # "low", "high", "max" (default "max")
+    "kimi_quick_reasoning_effort": None,  # "low", "high", "max" (default "max")
     # Sampling temperature, forwarded to every provider when set. None leaves
     # each provider at its own default. Lower values reduce run-to-run
     # variation on models that honor it; reasoning models largely ignore it

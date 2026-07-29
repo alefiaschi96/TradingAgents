@@ -41,6 +41,11 @@ export DASHBOARD_PORT="$PORT"
 export PAPER_STATE_PATH="$HOME/.tradingagents/paper_sim/$SLUG/state.json"
 export PAPER_LOG_DIR="$PWD/logs/paper_sim/$SLUG"
 
+# Wipe logs from any previous run of this instrument so the dashboard only
+# shows fresh data for this session.
+rm -rf "$PAPER_LOG_DIR"
+mkdir -p "$PAPER_LOG_DIR"
+
 # Dashboard in the background (it opens the browser itself; one tab).
 python -m paper_sim.dashboard "$PORT" 1>/dev/null &
 DASH_PID=$!

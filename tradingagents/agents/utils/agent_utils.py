@@ -169,6 +169,14 @@ def get_scenario_instruction() -> str:
         else ""
     )
 
+    min_size_rule = (
+        " On small accounts, if the size implied by current equity/leverage "
+        "would round below the exchange's minimum order size, the trade is "
+        "SKIPPED automatically that round rather than sent broken — a "
+        "low-conviction call near that floor adds no value, so prefer FLAT "
+        "unless the edge is real."
+    )
+
     scenario = (
         f" SCENARIO: you trade a crypto PERPETUAL FUTURE{instrument}{lev_txt}, "
         f"intraday on {tf} bars, holding ~1-2 hours. {direction} FLAT is the "
@@ -176,8 +184,8 @@ def get_scenario_instruction() -> str:
         f"edge — never take a position just to be active. {sizing_txt} and "
         f"bracketed by a volatility-based stop and a take-profit "
         f"at {rr_txt} the stop distance, {exit_txt}; one position "
-        f"at a time.{target_rule} Reason only from intraday price action and "
-        f"fresh catalysts."
+        f"at a time.{target_rule}{min_size_rule} Reason only from intraday price "
+        f"action and fresh catalysts."
     )
 
     # Optional higher-timeframe regime read, injected as INFORMATION only. It

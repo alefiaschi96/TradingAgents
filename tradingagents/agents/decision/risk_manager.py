@@ -5,14 +5,12 @@ Manager. Direction and conviction are already settled by the time this node
 runs (Signal Synthesizer -> Critic Manager -> Trader); this agent's sole job
 is to size the trade and set levels *deterministically*:
 
-- stop-loss / take-profit are ALWAYS read from the ATR-based ``get_sl_tp_levels``
-  tool, called directly in code so the numbers can never be an LLM invention
-  ("non sull'LLM a sentimento").
+- stop-loss / take-profit are ALWAYS precomputed by the ATR-based
+  ``get_sl_tp_levels`` tool, which returns three profiles (Tight / Standard
+  / Wide).  The LLM picks one profile; the code then forces that profile's
+  exact SL/TP values — the LLM never invents the numbers itself.
 - position size is a conviction-scaled tier (Full/Half/Quarter/None), capped
   by the Critic Manager's verdict.
-
-The LLM's only job is to copy those numbers into the final structured
-decision and write a short rationale — it never derives them itself.
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ from tradingagents.agents.schemas import (
     PortfolioRating,
     PositionSize,
     RiskDecision,
+    RiskProfile,
     render_risk_decision,
 )
 from tradingagents.agents.utils.agent_utils import (
@@ -38,6 +37,19 @@ from tradingagents.agents.utils.structured import (
 
 _ACTION_RE = re.compile(r"\*\*Action\*\*:\s*(\w+)", re.IGNORECASE)
 _VERDICT_RE = re.compile(r"\*\*Verdict\*\*:\s*(\w+)", re.IGNORECASE)
+
+# Parse each profile row from the ATR tool's table:
+#   | Tight (1.0×ATR, 2R) | 74.7955 | 78.4990 | 1.2345 | 1:2.0 |
+_PROFILE_ROW_RE = re.compile(
+    r"\|\s*(Tight|Standard|Wide)\b[^|]*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|",
+    re.IGNORECASE,
+)
+
+# Parse the LLM's chosen profile from rendered markdown:
+#   **Risk Profile**: Standard
+_PROFILE_CHOICE_RE = re.compile(
+    r"\*\*Risk Profile\*\*:\s*(\w+)", re.IGNORECASE,
+)
 
 
 def _parse_trader_action(text: str) -> str:
@@ -106,7 +118,20 @@ def create_risk_manager(llm):
         if critic_rating in ("Overweight", "Underweight"):
             max_size = "Half"
 
-        prompt = f"""You are the Risk Manager on an intraday crypto-perpetual desk. Direction and conviction are ALREADY decided upstream — your only job is to finalize sizing using the ATR-based levels below. Do NOT invent, adjust, or re-derive stop-loss / take-profit numbers; copy them exactly as given.
+        # ── Parse all profiles from tool output ──────────────────────
+        profiles: dict[str, tuple[float, float]] = {}
+        for m in _PROFILE_ROW_RE.finditer(sl_tp_table):
+            profiles[m.group(1).capitalize()] = (float(m.group(2)), float(m.group(3)))
+
+        if not profiles:
+            return {
+                "final_trade_decision": _no_trade_decision(
+                    "No trade this round: could not parse SL/TP profiles "
+                    f"from ATR tool output for {symbol}."
+                )
+            }
+
+        prompt = f"""You are the Risk Manager on an intraday crypto-perpetual desk. Direction and conviction are ALREADY decided upstream — your only job is to pick the right risk profile, set position size, and write a rationale.
 
 {instrument_context}
 
@@ -116,12 +141,20 @@ def create_risk_manager(llm):
 **Trader's proposal:**
 {trader_plan}
 
-**ATR-based SL/TP levels (source of truth — copy exactly, do not alter):**
+**ATR-based SL/TP profiles (precomputed — pick one):**
 {sl_tp_table}
 
 ---
 
-Set `rating` to the critic's rating ({critic_rating}) unless the data above makes a trade impossible, in which case fall back to Hold. Set `position_size` to at most **{max_size}** — "Full" only for high conviction (Buy/Sell) with no critic downgrade; otherwise "Half" or lower. Copy `stop_loss` and `take_profit` directly from the table above (the SL row and the 2R TP row — use the numeric values exactly). Write a short risk_rationale explaining the levels and size in plain terms.""" + get_language_instruction()
+**Instructions:**
+1. Set `rating` to the critic's rating ({critic_rating}).
+2. Set `risk_profile` to **Tight**, **Standard**, or **Wide** based on current volatility and signal quality:
+   - **Tight** (1.0×ATR, 2R): high-conviction, clean setup, low current volatility
+   - **Standard** (1.5×ATR, 2R): balanced default for most setups
+   - **Wide** (2.0×ATR, 3R): volatile conditions or weaker conviction
+3. Set `position_size` to at most **{max_size}** — "Full" only for high conviction (Buy/Sell) with no critic downgrade; otherwise "Half" or lower.
+4. You do NOT need to set stop_loss or take_profit — they are injected from the chosen profile automatically.
+5. Write a short risk_rationale explaining why you chose this profile and size.""" + get_language_instruction()
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,
@@ -129,6 +162,36 @@ Set `rating` to the critic's rating ({critic_rating}) unless the data above make
             prompt,
             render_risk_decision,
             "Risk Manager",
+        )
+
+        # ── Resolve chosen profile and override SL/TP ────────────────
+        choice_match = _PROFILE_CHOICE_RE.search(final_trade_decision)
+        chosen = choice_match.group(1).capitalize() if choice_match else "Standard"
+        if chosen not in profiles:
+            chosen = "Standard" if "Standard" in profiles else next(iter(profiles))
+
+        parsed_sl, parsed_tp = profiles[chosen]
+
+        final_trade_decision = re.sub(
+            r"(\*\*Stop Loss\*\*:\s*)\S+",
+            rf"\g<1>{parsed_sl}",
+            final_trade_decision,
+        )
+        final_trade_decision = re.sub(
+            r"(\*\*Take Profit\*\*:\s*)\S+",
+            rf"\g<1>{parsed_tp}",
+            final_trade_decision,
+        )
+        final_trade_decision = re.sub(
+            r"(\*\*Price Target\*\*:\s*)\S+",
+            rf"\g<1>{parsed_tp}",
+            final_trade_decision,
+        )
+        # Ensure the chosen profile is reflected in the text
+        final_trade_decision = re.sub(
+            r"(\*\*Risk Profile\*\*:\s*)\S+",
+            rf"\g<1>{chosen}",
+            final_trade_decision,
         )
 
         return {"final_trade_decision": final_trade_decision}

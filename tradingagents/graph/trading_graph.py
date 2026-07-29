@@ -29,7 +29,7 @@ from tradingagents.agents.utils.futures_data_tools import (
     get_open_interest,
     get_orderbook_imbalance,
 )
-from tradingagents.agents.utils.sl_tp_tools import get_sl_tp_levels
+
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
@@ -75,24 +75,28 @@ class TradingAgentsGraph:
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
-        # Initialize LLMs with provider-specific thinking configuration
-        llm_kwargs = self._get_provider_kwargs()
+        # Initialize LLMs with provider-specific thinking configuration.
+        # Deep and quick models may receive different kwargs (e.g. Kimi K3
+        # uses the same model id with different reasoning_effort levels).
+        deep_kwargs = self._get_provider_kwargs(role="deep")
+        quick_kwargs = self._get_provider_kwargs(role="quick")
 
         # Add callbacks to kwargs if provided (passed to LLM constructor)
         if self.callbacks:
-            llm_kwargs["callbacks"] = self.callbacks
+            deep_kwargs["callbacks"] = self.callbacks
+            quick_kwargs["callbacks"] = self.callbacks
 
         deep_client = create_llm_client(
             provider=self.config["llm_provider"],
             model=self.config["deep_think_llm"],
             base_url=self.config.get("backend_url"),
-            **llm_kwargs,
+            **deep_kwargs,
         )
         quick_client = create_llm_client(
             provider=self.config["llm_provider"],
             model=self.config["quick_think_llm"],
             base_url=self.config.get("backend_url"),
-            **llm_kwargs,
+            **quick_kwargs,
         )
 
         self.deep_thinking_llm = deep_client.get_llm()
@@ -129,8 +133,13 @@ class TradingAgentsGraph:
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
 
-    def _get_provider_kwargs(self) -> dict[str, Any]:
-        """Get provider-specific kwargs for LLM client creation."""
+    def _get_provider_kwargs(self, *, role: str = "") -> dict[str, Any]:
+        """Get provider-specific kwargs for LLM client creation.
+
+        Args:
+            role: ``"deep"`` or ``"quick"`` — allows per-role reasoning
+                  effort for providers that support it (e.g. Kimi K3).
+        """
         kwargs = {}
         provider = self.config.get("llm_provider", "").lower()
 
@@ -149,12 +158,21 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
+        elif provider == "kimi":
+            key = f"kimi_{role}_reasoning_effort" if role else None
+            effort = (self.config.get(key) if key else None)
+            if effort:
+                kwargs["reasoning_effort"] = effort
+
         # Sampling temperature is cross-provider: forward it whenever set.
         # float() here so a value coming from a TRADINGAGENTS_TEMPERATURE env
         # string ("0.2") works the same as a programmatic float.
-        temperature = self.config.get("temperature")
-        if temperature is not None and temperature != "":
-            kwargs["temperature"] = float(temperature)
+        # Kimi K3 only accepts temperature=1 and rejects any other value,
+        # so we skip forwarding it for the kimi provider.
+        if provider != "kimi":
+            temperature = self.config.get("temperature")
+            if temperature is not None and temperature != "":
+                kwargs["temperature"] = float(temperature)
 
         return kwargs
 
@@ -180,8 +198,7 @@ class TradingAgentsGraph:
                     get_funding_rate,
                     get_open_interest,
                     get_orderbook_imbalance,
-                    # Intraday-specific tools (SL/TP levels, BTC trend)
-                    get_sl_tp_levels,
+                    # Intraday-specific tools (BTC trend)
                     get_btc_trend,
                 ]
             ),

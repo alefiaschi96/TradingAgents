@@ -108,6 +108,8 @@ class Config:
     temperature: float
     analysts: tuple[str, ...]
     google_thinking_level: str       # "" leaves the model default; "low"/"high" tune latency
+    kimi_deep_reasoning_effort: str    # "low", "high", "max" (default "max"); deep model
+    kimi_quick_reasoning_effort: str   # "low", "high", "max" (default "max"); quick model
     analysis_max_attempts: int       # retries on transient network drops during analysis
     analysis_timeout_sec: int        # abort+retry an analysis that stalls longer than this (0=off)
     stream_llm: bool                 # stream Gemini calls (avoids ~60s non-streaming cutoff)
@@ -169,6 +171,8 @@ class Config:
             temperature=_f("TEMPERATURE", 0.0),
             analysts=analysts,
             google_thinking_level=_s("GOOGLE_THINKING_LEVEL", ""),
+            kimi_deep_reasoning_effort=_s("KIMI_DEEP_REASONING_EFFORT", ""),
+            kimi_quick_reasoning_effort=_s("KIMI_QUICK_REASONING_EFFORT", ""),
             analysis_max_attempts=_i("ANALYSIS_MAX_ATTEMPTS", 3),
             analysis_timeout_sec=_i("ANALYSIS_TIMEOUT_SEC", 600),
             stream_llm=_b("STREAM_LLM", True),

@@ -15,7 +15,6 @@ from tradingagents.agents.utils.futures_data_tools import (
     get_open_interest,
     get_orderbook_imbalance,
 )
-from tradingagents.agents.utils.sl_tp_tools import get_sl_tp_levels
 from tradingagents.dataflows.config import get_config
 
 
@@ -88,10 +87,6 @@ Volatility / levels:
 - boll / boll_ub / boll_lb: 20-bar Bollinger Bands — band tags flag over-extension; squeezes precede breakouts.
 - atr: 14-bar ATR — current volatility.
 
-## SL/TP levels
-
-After determining your directional bias, call **get_sl_tp_levels** with the symbol and direction ('long' or 'short'). It returns precomputed stop-loss (1.5×ATR) and take-profit targets at 2R and 3R with R:R ratios. Include these levels in your report — do NOT derive them manually from raw ATR.
-
 ## Futures market-structure (Kraken Futures, public)
 
 Call get_funding_rate, get_open_interest, and get_orderbook_imbalance for this symbol.
@@ -115,7 +110,6 @@ If you are NOT analyzing BTC, call **get_btc_trend** to get BTC's intraday direc
 3. Call get_verified_market_snapshot for ground-truth values.
 4. Call get_funding_rate, get_open_interest, get_orderbook_imbalance.
 5. If not BTC, call get_btc_trend.
-6. Determine directional bias, then call get_sl_tp_levels.
 
 Treat the verified snapshot as the source of truth — never invent numbers.
 
@@ -126,7 +120,6 @@ Treat the verified snapshot as the source of truth — never invent numbers.
 - **Position vs VWAPs:** rolling 24h VWAP bias + session VWAP / σ-band position.
 - **Key intraday levels:** swing highs/lows from 1h/3h, band edges, round numbers.
 - **Setup type:** breakout/continuation or mean-reversion.
-- **SL/TP levels:** from the tool, with R:R.
 - **BTC context** (if applicable).
 - **Derivatives positioning:** funding trend + acceleration, OI, book imbalance.
 
@@ -160,7 +153,6 @@ def create_market_analyst(llm):
                 get_funding_rate,
                 get_open_interest,
                 get_orderbook_imbalance,
-                get_sl_tp_levels,
             ]
             # Add BTC trend tool only when the current ticker is NOT BTC
             ticker = (state.get("company_of_interest") or "").upper()

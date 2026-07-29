@@ -88,6 +88,10 @@ def build_config(cfg) -> dict:
     config["temperature"] = cfg.temperature
     if cfg.google_thinking_level:
         config["google_thinking_level"] = cfg.google_thinking_level
+    if cfg.kimi_deep_reasoning_effort:
+        config["kimi_deep_reasoning_effort"] = cfg.kimi_deep_reasoning_effort
+    if cfg.kimi_quick_reasoning_effort:
+        config["kimi_quick_reasoning_effort"] = cfg.kimi_quick_reasoning_effort
 
     # Early market gate: when the analyst gate is on, a market report that backs
     # no trade (HOLD/flat or no usable data) ends the graph right after the

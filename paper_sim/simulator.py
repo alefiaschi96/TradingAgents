@@ -299,7 +299,15 @@ class PaperSimulator:
 
     # ------------------------------------------------------------- prices
     def last_price(self) -> float:
-        return self.kraken.get_last_price()
+        """Fetch last price with retry — mirrors _fetch_ohlcv resilience."""
+        last_err = None
+        for attempt in range(3):
+            try:
+                return self.kraken.get_last_price()
+            except Exception as e:  # noqa: BLE001 - transient endpoint blips
+                last_err = e
+                time.sleep(1.0 * (attempt + 1))
+        raise last_err
 
     def _fetch_ohlcv(self, timeframe: str, limit: int) -> list:
         """Fetch candles with retry — Kraken's charts endpoint drops often.
@@ -490,7 +498,6 @@ class PaperSimulator:
     def maybe_decide(self, now_ts: float) -> None:
         """Run the analysis; open a simulated position if it says long/short."""
         rating, state = run_analysis(self.cfg)
-        self.state["last_decision_at"] = now_ts
         # Persist the full agent reasoning (market/news/debate/PM) to the JSONL,
         # always — it is otherwise only printed to stdout and lost.
         self._emit_event("analysis", rating=rating, **reasoning_from_state(state))
@@ -498,16 +505,27 @@ class PaperSimulator:
         if side is None:
             logger.info("decision %s -> no entry (stay flat)", rating)
             self._emit_event("decision", rating=rating, side=None, action="flat")
+            self.state["last_decision_at"] = now_ts
             return
-        self._emit_event("decision", rating=rating, side=side, action="open")
         decision_text = (state or {}).get("final_trade_decision", "")
         analyst_target = parse_price_target(decision_text)
         rm = parse_rm_levels(decision_text)
-        self.open_position(
-            side, rating, analyst_target=analyst_target,
-            rm_sl=rm.get("sl"), rm_tp=rm.get("tp"),
-            rm_size_fraction=rm.get("size_fraction"),
-        )
+        self._emit_event("decision", rating=rating, side=side, action="open")
+        try:
+            self.open_position(
+                side, rating, analyst_target=analyst_target,
+                rm_sl=rm.get("sl"), rm_tp=rm.get("tp"),
+                rm_size_fraction=rm.get("size_fraction"),
+            )
+        except Exception:
+            # Transient failure (e.g. price-fetch timeout) — do NOT update
+            # last_decision_at so the signal is retried on the next tick
+            # instead of being silently lost.
+            logger.exception(
+                "open_position failed for %s %s — will retry next tick", side, rating,
+            )
+            return
+        self.state["last_decision_at"] = now_ts
 
     def _fill_price(self, price: float, fill_side: str) -> float:
         """Adverse-slippage fill for a market order: a buy fills higher, a sell
